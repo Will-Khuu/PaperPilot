@@ -1,0 +1,497 @@
+<title>RAG Whiteboard</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;800&family=Caveat:wght@600&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: one tall whiteboard. Ingest lane on top, shared vector DB band in the middle, Ask lane below, then a chunk traced in detail, decision sticky notes, failure table, and a checkable build order. */
+:root {
+  --board: #f3f5f6;
+  --dot: #d6dce0;
+  --ink: #1b2631;
+  --ink-soft: #4d5b66;
+  --card: #ffffff;
+  --line: #2b3946;
+  --blue: #2155d4;
+  --green: #12795a;
+  --red: #c8392a;
+  --amber: #a86300;
+  --code-bg: #e8edef;
+  --track: #cfd7dc;
+  --sticky-yellow: #fbe58a;
+  --sticky-blue: #bcd5fb;
+  --sticky-mint: #bfe9d3;
+  --sticky-pink: #f7c3cf;
+  --sticky-ink: #26241a;
+  --font-display: "Bricolage Grotesque", "Helvetica Neue", Arial, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, Menlo, Consolas, monospace;
+  --font-hand: "Caveat", "Segoe Print", "Bradley Hand", cursive;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --board: #182027;
+    --dot: #2a343d;
+    --ink: #e9eef1;
+    --ink-soft: #a9b6bf;
+    --card: #212b33;
+    --line: #6b7f8c;
+    --blue: #86adff;
+    --green: #62d6a3;
+    --red: #ff8f7d;
+    --amber: #f2b84b;
+    --code-bg: #141b21;
+    --track: #35434d;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --board: #182027;
+  --dot: #2a343d;
+  --ink: #e9eef1;
+  --ink-soft: #a9b6bf;
+  --card: #212b33;
+  --line: #6b7f8c;
+  --blue: #86adff;
+  --green: #62d6a3;
+  --red: #ff8f7d;
+  --amber: #f2b84b;
+  --code-bg: #141b21;
+  --track: #35434d;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background-color: var(--board);
+  background-image: radial-gradient(var(--dot) 1.2px, transparent 1.4px);
+  background-size: 26px 26px;
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.55;
+  padding-block: 40px 72px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.wrap { max-width: 1240px; margin: 0 auto; display: flex; flex-direction: column; gap: 72px; }
+h1, h2, h3, h4 { font-family: var(--font-display); margin: 0; text-wrap: balance; line-height: 1.1; }
+p { margin: 0; }
+:focus-visible { outline: 3px solid var(--blue); outline-offset: 3px; border-radius: 4px; }
+
+/* header */
+.top { display: grid; gap: 14px; max-width: 760px; }
+.top h1 { font-size: clamp(2.6rem, 7vw, 4.4rem); font-weight: 800; letter-spacing: -0.02em; }
+.top .sub { font-size: 1.08rem; color: var(--ink-soft); max-width: 62ch; }
+.hand { font-family: var(--font-hand); font-weight: 600; font-size: 1.7rem; line-height: 1.1; color: var(--red); }
+.top .hand { transform: rotate(-1.5deg); transform-origin: left; }
+
+.sec { display: grid; gap: 26px; }
+.sec > header { display: grid; gap: 8px; max-width: 70ch; }
+.sec h2 { font-size: clamp(1.6rem, 3.4vw, 2.2rem); font-weight: 800; letter-spacing: -0.01em; }
+.sec header p { color: var(--ink-soft); }
+
+/* lanes */
+.lane { --lane: var(--blue); display: grid; gap: 20px; }
+.lane.ask { --lane: var(--green); }
+.lane-head { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
+.lane-head h3 {
+  font-size: 1.5rem; font-weight: 800; color: var(--lane);
+  text-decoration: underline wavy var(--lane) 2px; text-underline-offset: 7px;
+}
+.lane-head .hand { color: var(--ink-soft); font-size: 1.45rem; }
+.stages { list-style: none; margin: 0; padding: 0; display: grid; gap: 38px; grid-template-columns: 1fr; }
+.stage {
+  position: relative; background: var(--card); border: 2px solid var(--line);
+  border-radius: 14px 10px 16px 11px; padding: 16px 16px 14px; display: grid; gap: 9px; align-content: start; min-width: 0;
+}
+.stage::after {
+  content: "\2193"; position: absolute; left: 50%; bottom: -39px; transform: translateX(-50%);
+  font-family: var(--font-hand); font-weight: 600; font-size: 2.3rem; line-height: 1; color: var(--lane);
+}
+.stage:last-child::after { display: none; }
+.stage .top-row { display: flex; align-items: center; gap: 10px; }
+.stage .n {
+  flex: none; width: 28px; height: 28px; border-radius: 50%; border: 2px solid var(--lane); color: var(--lane);
+  display: grid; place-items: center; font-family: var(--font-mono); font-weight: 500; font-size: 13px;
+}
+.stage h4 { font-size: 1.25rem; font-weight: 800; }
+.tool { font-family: var(--font-mono); font-size: 12px; color: var(--lane); }
+.io { font-size: 13.5px; color: var(--ink); }
+.io b { font-family: var(--font-mono); font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-soft); margin-right: 6px; }
+.learn {
+  font-family: var(--font-hand); font-weight: 600; font-size: 1.25rem; line-height: 1.15; color: var(--ink);
+  border-top: 2px dashed var(--track); padding-top: 9px; margin-top: 2px;
+}
+.learn::before { content: "learn: "; color: var(--red); }
+@media (min-width: 1000px) {
+  .stages.four { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 34px; }
+  .stages.five { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 30px; }
+  .stage::after { content: "\2192"; left: auto; right: -31px; bottom: auto; top: 12px; transform: none; font-size: 2.2rem; }
+}
+
+/* shared db band */
+.db-band { display: grid; gap: 14px; align-items: center; grid-template-columns: 1fr; }
+.db-note { font-family: var(--font-hand); font-weight: 600; font-size: 1.45rem; line-height: 1.1; }
+.db-note.write { color: var(--blue); }
+.db-note.read { color: var(--green); }
+.db {
+  display: grid; grid-template-columns: auto 1fr; gap: 16px; align-items: center;
+  background: var(--card); border: 2px solid var(--line); border-radius: 16px 12px 14px 18px; padding: 18px 20px;
+}
+.db svg { width: 54px; height: 62px; color: var(--ink); }
+.db h4 { font-size: 1.3rem; font-weight: 800; margin-bottom: 4px; }
+.db p { font-size: 14px; color: var(--ink-soft); }
+.db code { font-family: var(--font-mono); font-size: 12.5px; color: var(--ink); }
+@media (min-width: 1000px) {
+  .db-band { grid-template-columns: 1fr minmax(0, 2fr) 1fr; gap: 24px; }
+  .db-note.write { text-align: right; }
+}
+
+/* chunk trace */
+.trace { display: grid; gap: 24px; grid-template-columns: 1fr; align-items: start; }
+@media (min-width: 900px) { .trace { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); } }
+.code-wrap { overflow-x: auto; background: var(--code-bg); border: 2px solid var(--line); border-radius: 12px 16px 11px 14px; }
+pre { margin: 0; padding: 18px 20px; font-family: var(--font-mono); font-size: 13px; line-height: 1.7; color: var(--ink); }
+.hl { padding: 1px 3px; border-radius: 3px; }
+.hl.t { background: color-mix(in srgb, var(--blue) 20%, transparent); }
+.hl.m { background: color-mix(in srgb, var(--green) 22%, transparent); }
+.hl.v { background: color-mix(in srgb, var(--red) 20%, transparent); }
+.notes { display: grid; gap: 14px; }
+.note { display: grid; gap: 4px; padding-left: 14px; border-left: 4px solid var(--c); }
+.note.t { --c: var(--blue); } .note.m { --c: var(--green); } .note.v { --c: var(--red); }
+.note h4 { font-family: var(--font-mono); font-size: 13px; font-weight: 500; color: var(--c); }
+.note p { font-size: 14.5px; }
+.cite-chain { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; }
+.cite-chain .box {
+  background: var(--card); border: 2px solid var(--line); border-radius: 10px 13px 9px 12px; padding: 8px 12px;
+  font-size: 13.5px; min-width: 0;
+}
+.cite-chain .box code { font-family: var(--font-mono); font-size: 12.5px; }
+.cite-chain .arrow { font-family: var(--font-hand); font-weight: 600; font-size: 1.9rem; line-height: 1; color: var(--red); }
+.cite-label { font-family: var(--font-hand); font-weight: 600; font-size: 1.4rem; color: var(--ink-soft); margin-bottom: 6px; }
+
+/* stickies */
+.stickies { display: grid; gap: 26px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 270px), 1fr)); }
+.sticky {
+  --bg: var(--sticky-yellow); background: var(--bg); color: var(--sticky-ink); padding: 18px 18px 20px;
+  display: grid; gap: 9px; align-content: start; min-width: 0;
+  box-shadow: 0 1px 1px rgba(0,0,0,.18), 0 10px 18px -8px rgba(0,0,0,.35);
+  transform: rotate(var(--tilt, 0deg));
+}
+.sticky:nth-child(4n+1) { --bg: var(--sticky-yellow); --tilt: -0.9deg; }
+.sticky:nth-child(4n+2) { --bg: var(--sticky-blue); --tilt: 0.7deg; }
+.sticky:nth-child(4n+3) { --bg: var(--sticky-mint); --tilt: -0.5deg; }
+.sticky:nth-child(4n+4) { --bg: var(--sticky-pink); --tilt: 0.9deg; }
+.sticky h3 { font-family: var(--font-hand); font-weight: 600; font-size: 1.85rem; line-height: 1; }
+.sticky p { font-size: 14px; line-height: 1.5; }
+.sticky p b { font-weight: 600; }
+.sticky .k { font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.09em; display: block; opacity: .75; }
+
+/* failure table */
+.table-wrap { overflow-x: auto; background: var(--card); border: 2px solid var(--line); border-radius: 14px 11px 16px 12px; }
+table { border-collapse: collapse; width: 100%; min-width: 680px; font-size: 14px; }
+th { text-align: left; font-family: var(--font-mono); font-size: 11px; font-weight: 500; text-transform: uppercase; letter-spacing: 0.09em; color: var(--ink-soft); padding: 12px 16px; border-bottom: 2px solid var(--line); }
+td { padding: 12px 16px; vertical-align: top; border-bottom: 1px dashed var(--track); }
+tr:last-child td { border-bottom: 0; }
+td:first-child { font-weight: 600; width: 28%; }
+td:nth-child(2) { color: var(--ink-soft); width: 34%; }
+
+/* build order */
+.build { display: grid; gap: 28px; grid-template-columns: 1fr; align-items: start; }
+@media (min-width: 900px) { .build { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); } }
+.progress { display: grid; gap: 8px; max-width: 420px; }
+.progress .bar { height: 10px; background: var(--track); border-radius: 6px; overflow: hidden; }
+.progress .fill { height: 100%; width: 0; background: var(--green); border-radius: 6px; }
+.progress .count { font-family: var(--font-mono); font-size: 12.5px; color: var(--ink-soft); }
+.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.steps label {
+  display: grid; grid-template-columns: auto 1fr; gap: 14px; align-items: start; cursor: pointer;
+  background: var(--card); border: 2px solid var(--line); border-radius: 12px 9px 13px 10px; padding: 12px 14px;
+}
+.steps input { width: 20px; height: 20px; margin: 2px 0 0; accent-color: var(--green); }
+.steps .t { font-weight: 600; display: block; }
+.steps .a { font-size: 13.5px; color: var(--ink-soft); display: block; margin-top: 2px; }
+.steps .q { display: block; margin-top: 6px; font-family: var(--font-hand); font-weight: 600; font-size: 1.25rem; line-height: 1.15; color: var(--ink); }
+.steps .q::before { content: "explain: "; color: var(--red); }
+.steps input:checked + span .t { text-decoration: line-through; text-decoration-color: var(--green); text-decoration-thickness: 2px; color: var(--ink-soft); }
+.parked { background: var(--card); border: 2px dashed var(--line); border-radius: 14px 11px 15px 12px; padding: 18px; display: grid; gap: 12px; }
+.parked h3 { font-size: 1.3rem; font-weight: 800; }
+.parked ul { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 8px; }
+.parked li { font-family: var(--font-mono); font-size: 12.5px; padding: 4px 10px; border: 1.5px solid var(--line); border-radius: 999px; }
+.parked p { font-size: 14px; color: var(--ink-soft); }
+.foot { font-size: 13px; color: var(--ink-soft); max-width: 70ch; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .sticky { transition: transform .15s ease; }
+  .sticky:hover { transform: rotate(0deg) translateY(-3px); }
+}
+</style>
+
+<div class="wrap">
+
+  <header class="top">
+    <h1>RAG Whiteboard</h1>
+    <p class="sub">Mapping PaperPilot, a research paper assistant, before any of it is written. The aim is to understand each stage well enough to explain it, and to know how to tell when it is working.</p>
+    <p class="hand">Two pipelines. One shared database.</p>
+  </header>
+
+  <section class="sec" aria-labelledby="h-system">
+    <header>
+      <h2 id="h-system">The whole system on one board</h2>
+      <p>Ingest runs when a paper is uploaded. Ask runs on every question. They only meet in the vector database, which is why the same embedding model has to sit on both sides.</p>
+    </header>
+
+    <div class="lane ingest">
+      <div class="lane-head"><h3>Ingest</h3><span class="hand">runs once per paper</span></div>
+      <ol class="stages four">
+        <li class="stage">
+          <div class="top-row"><span class="n">1</span><h4>Upload</h4></div>
+          <p class="tool">FastAPI file upload</p>
+          <p class="io"><b>In</b>A PDF file</p>
+          <p class="io"><b>Out</b>The file on disk, with a paper id</p>
+          <p class="learn">give every paper an id now. Each chunk carries it later, and compare mode filters on it.</p>
+        </li>
+        <li class="stage">
+          <div class="top-row"><span class="n">2</span><h4>Parse</h4></div>
+          <p class="tool">PyMuPDF</p>
+          <p class="io"><b>In</b>The PDF</p>
+          <p class="io"><b>Out</b>Text blocks in reading order, each with its page number</p>
+          <p class="learn">PDF text can come out in odd order, with headers, footers and split words mixed in. Print the raw output for one paper before trusting it.</p>
+        </li>
+        <li class="stage">
+          <div class="top-row"><span class="n">3</span><h4>Chunk</h4></div>
+          <p class="tool">Plain Python</p>
+          <p class="io"><b>In</b>Page text</p>
+          <p class="io"><b>Out</b>Pieces of roughly 500 to 800 tokens, split at section headings, tagged with page and section</p>
+          <p class="learn">a chunk is the unit that gets retrieved and cited. Its size sets how precise a citation can be.</p>
+        </li>
+        <li class="stage">
+          <div class="top-row"><span class="n">4</span><h4>Embed</h4></div>
+          <p class="tool">Embedding model</p>
+          <p class="io"><b>In</b>Chunk text</p>
+          <p class="io"><b>Out</b>One vector of floats per chunk (384 numbers for Chroma's default local model)</p>
+          <p class="learn">text with similar meaning lands close together in vector space. That is the whole trick.</p>
+        </li>
+      </ol>
+    </div>
+
+    <div class="db-band">
+      <p class="db-note write">chunks, vectors and metadata get written here</p>
+      <div class="db">
+        <svg viewBox="0 0 54 62" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" aria-hidden="true">
+          <ellipse cx="27" cy="11" rx="22" ry="8"></ellipse>
+          <path d="M5 11v38c0 4.4 9.8 8 22 8s22-3.6 22-8V11"></path>
+          <path d="M5 30c0 4.4 9.8 8 22 8s22-3.6 22-8"></path>
+        </svg>
+        <div>
+          <h4>Chroma, the vector database</h4>
+          <p>One collection, one row per chunk. Each row holds <code>text</code>, <code>embedding</code> and <code>metadata</code> (paper id, title, page, section).</p>
+        </div>
+      </div>
+      <p class="db-note read">the closest chunks get read back from here</p>
+    </div>
+
+    <div class="lane ask">
+      <div class="lane-head"><h3>Ask</h3><span class="hand">runs on every question</span></div>
+      <ol class="stages five">
+        <li class="stage">
+          <div class="top-row"><span class="n">1</span><h4>Question</h4></div>
+          <p class="tool">Streamlit chat box</p>
+          <p class="io"><b>In</b>"What architecture does this paper use?"</p>
+          <p class="io"><b>Out</b>The text, plus which papers are selected</p>
+          <p class="learn">keep the selected paper ids. They become a filter on the search.</p>
+        </li>
+        <li class="stage">
+          <div class="top-row"><span class="n">2</span><h4>Embed question</h4></div>
+          <p class="tool">Same model as ingest</p>
+          <p class="io"><b>In</b>The question text</p>
+          <p class="io"><b>Out</b>One vector</p>
+          <p class="learn">a different model puts vectors in a different space, and search returns noise.</p>
+        </li>
+        <li class="stage">
+          <div class="top-row"><span class="n">3</span><h4>Retrieve</h4></div>
+          <p class="tool">Chroma query</p>
+          <p class="io"><b>In</b>The question vector</p>
+          <p class="io"><b>Out</b>Top 5 chunks by distance, with metadata</p>
+          <p class="learn">build and test this with no LLM attached. If the right chunk is not in the top 5, nothing after it can fix that.</p>
+        </li>
+        <li class="stage">
+          <div class="top-row"><span class="n">4</span><h4>Build prompt</h4></div>
+          <p class="tool">String template</p>
+          <p class="io"><b>In</b>Chunks and question</p>
+          <p class="io"><b>Out</b>Instructions, numbered excerpts [1] to [5], then the question</p>
+          <p class="learn">tell the model to answer only from the excerpts, and to say so when they do not contain the answer.</p>
+        </li>
+        <li class="stage">
+          <div class="top-row"><span class="n">5</span><h4>Answer</h4></div>
+          <p class="tool">LLM (Claude or OpenAI)</p>
+          <p class="io"><b>In</b>The prompt</p>
+          <p class="io"><b>Out</b>Answer text with [1], [2] markers</p>
+          <p class="learn">citations work because you numbered the excerpts. Map each marker back to that chunk's metadata.</p>
+        </li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="sec" aria-labelledby="h-chunk">
+    <header>
+      <h2 id="h-chunk">One chunk, from the inside</h2>
+      <p>Everything in the system is built around this record. Values are illustrative.</p>
+    </header>
+    <div class="trace">
+      <div class="code-wrap">
+<pre>{
+  "id": "attn-p3-c2",
+  <span class="hl t">"text": "The encoder is a stack of identical
+           layers, each with a self-attention
+           sub-layer and a feed-forward ..."</span>,
+  <span class="hl m">"metadata": {
+    "paper_id": "attn",
+    "title": "Attention Is All You Need",
+    "page": 3,
+    "section": "3.1 Encoder and Decoder Stacks"
+  }</span>,
+  <span class="hl v">"embedding": [0.021, -0.113, 0.087, ...]</span>
+}</pre>
+      </div>
+      <div class="notes">
+        <div class="note t"><h4>text</h4><p>What the LLM reads. It goes into the prompt as one numbered excerpt.</p></div>
+        <div class="note m"><h4>metadata</h4><p>What the citation shows. If you do not store it at ingest, you cannot rebuild it later.</p></div>
+        <div class="note v"><h4>embedding</h4><p>What search compares. The user never sees it.</p></div>
+      </div>
+    </div>
+    <div>
+      <p class="cite-label">how a [1] turns into a source link</p>
+      <div class="cite-chain">
+        <div class="box">Answer says <code>"...removes recurrence [1]"</code></div>
+        <span class="arrow" aria-hidden="true">&rarr;</span>
+        <div class="box">Excerpt 1 in the prompt was <code>attn-p3-c2</code></div>
+        <span class="arrow" aria-hidden="true">&rarr;</span>
+        <div class="box">Its metadata gives <code>Attention Is All You Need, p. 3</code></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="sec" aria-labelledby="h-decisions">
+    <header>
+      <h2 id="h-decisions">Decisions, in the order you will face them</h2>
+      <p>Each note has a starting value and a way to test it. Change one thing at a time and rerun the same questions.</p>
+    </header>
+    <div class="stickies">
+      <article class="sticky">
+        <h3>Chunking</h3>
+        <p><span class="k">Start with</span>Split at section headings, cap at about 600 tokens, overlap 80 tokens.</p>
+        <p><span class="k">Why</span>A section holds one idea. Overlap protects sentences cut at a boundary.</p>
+        <p><span class="k">Test</span>Read 10 chunks by eye. Does each one make sense on its own?</p>
+      </article>
+      <article class="sticky">
+        <h3>Embedding model</h3>
+        <p><span class="k">Start with</span>Chroma's default local model.</p>
+        <p><span class="k">Why</span>No API key, fast to iterate. The answer LLM and the embedding model are separate choices.</p>
+        <p><span class="k">Test</span>Later, try a hosted model and compare hit rate on your question set.</p>
+      </article>
+      <article class="sticky">
+        <h3>Distance metric</h3>
+        <p><span class="k">Start with</span>Cosine similarity.</p>
+        <p><span class="k">Why</span>Chroma defaults to L2 unless you set the metric when you create the collection.</p>
+        <p><span class="k">Test</span>Query with a sentence copied straight from a chunk. It should come back first.</p>
+      </article>
+      <article class="sticky">
+        <h3>How many chunks</h3>
+        <p><span class="k">Start with</span>Top 5.</p>
+        <p><span class="k">Why</span>Too few misses the answer. Too many buries it and costs more per question.</p>
+        <p><span class="k">Test</span>Raise to 10 and check whether hit rate actually improves.</p>
+      </article>
+      <article class="sticky">
+        <h3>Prompt rules</h3>
+        <p><span class="k">Start with</span>Answer only from the numbered excerpts, cite as [n], and say when the excerpts do not cover it.</p>
+        <p><span class="k">Why</span>Without the last rule the model fills gaps from memory.</p>
+        <p><span class="k">Test</span>Ask something the paper never mentions. Does it decline or invent?</p>
+      </article>
+      <article class="sticky">
+        <h3>Compare mode</h3>
+        <p><span class="k">Start with</span>Search each paper separately using the paper id filter, take the top 3 from each, then ask the LLM to contrast them.</p>
+        <p><span class="k">Why</span>One global top 5 lets the paper with more matching text crowd out the other.</p>
+        <p><span class="k">Test</span>Compare two papers and check both appear in the sources.</p>
+      </article>
+    </div>
+  </section>
+
+  <section class="sec" aria-labelledby="h-breaks">
+    <header>
+      <h2 id="h-breaks">Where it breaks</h2>
+      <p>Most RAG bugs look like model problems and are really retrieval or parsing problems. Check the stage before the LLM first.</p>
+    </header>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Symptom</th><th>Likely cause</th><th>Try</th></tr></thead>
+        <tbody>
+          <tr><td>Answer sounds right but is wrong</td><td>The right chunk was never retrieved</td><td>Print the top 5 for that question. Adjust chunk size or k.</td></tr>
+          <tr><td>Answer misses a number from a table</td><td>The parser flattened or dropped the table</td><td>Inspect the parsed text for that page. Extract tables separately later.</td></tr>
+          <tr><td>Citation points to the wrong page</td><td>A chunk spans two pages and only one page was recorded</td><td>Store the start page for each chunk, and the end page if it differs.</td></tr>
+          <tr><td>One paper dominates a comparison</td><td>A single global search over all papers</td><td>Query per paper with the paper id filter.</td></tr>
+          <tr><td>Model answers when the paper is silent</td><td>The prompt allows outside knowledge</td><td>Tighten the rule, then test with unanswerable questions.</td></tr>
+          <tr><td>Short vague questions return junk</td><td>The question vector carries too little meaning</td><td>Later: have the LLM rewrite the question before searching.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="sec" aria-labelledby="h-build">
+    <header>
+      <h2 id="h-build">Build order</h2>
+      <p>One step per sitting is plenty. Each step ends with a question to answer out loud before you move on, and a one-line entry in a decisions file saying what you chose and why. Retrieval comes before generation, so by step 3 you can see whether search works with no LLM involved.</p>
+    </header>
+    <div class="build">
+      <div style="display:grid;gap:18px;min-width:0">
+        <div class="progress">
+          <div class="bar"><div class="fill" id="fill"></div></div>
+          <p class="count" id="count">0 of 8 done</p>
+        </div>
+        <ul class="steps" id="steps">
+          <li><label><input type="checkbox" id="step-1"><span><span class="t">Parse one paper and print it page by page</span><span class="a">See how messy PDF text really is.</span><span class="q">what in the parsed text would hurt retrieval, and what would you do about it?</span></span></label></li>
+          <li><label><input type="checkbox" id="step-2"><span><span class="t">Chunk it and attach page and section</span><span class="a">Print 10 chunks. Decide whether each stands on its own.</span><span class="q">why split at headings instead of every N tokens, and why overlap?</span></span></label></li>
+          <li><label><input type="checkbox" id="step-3"><span><span class="t">Embed, store in Chroma, query from a script</span><span class="a">Print the top 5 with distances. No LLM yet. Judge retrieval by itself.</span><span class="q">what is a vector, and why does a close vector mean a relevant chunk?</span></span></label></li>
+          <li><label><input type="checkbox" id="step-4"><span><span class="t">Add the prompt and LLM call as a command line script</span><span class="a">Print the answer and a Sources list. Confirm citations work end to end.</span><span class="q">how does a [1] in the answer get back to a page number?</span></span></label></li>
+          <li><label><input type="checkbox" id="step-5"><span><span class="t">Write 20 questions with the page each answer is on</span><span class="a">Compute how often the right page is in the top 5. That is your baseline number.</span><span class="q">what does hit rate at 5 measure, and what does it miss?</span></span></label></li>
+          <li><label><input type="checkbox" id="step-6"><span><span class="t">Change chunk size or overlap and rerun the questions</span><span class="a">Record what moved. This is the step that teaches you the most.</span><span class="q">what changed when you altered chunk size, and why do you think it did?</span></span></label></li>
+          <li><label><input type="checkbox" id="step-7"><span><span class="t">Wrap it in FastAPI and add the Streamlit chat</span><span class="a">The interface comes after the pipeline is trustworthy.</span><span class="q">which parts of the script moved into the API, and which stayed the same?</span></span></label></li>
+          <li><label><input type="checkbox" id="step-8"><span><span class="t">Add multi-paper upload, compare mode, summaries and notes</span><span class="a">Compare mode reuses the paper id filter from step 1.</span><span class="q">why does compare mode need a filter instead of one big search?</span></span></label></li>
+        </ul>
+      </div>
+      <aside class="parked">
+        <h3>Parked for later</h3>
+        <ul>
+          <li>Pinecone</li><li>PostgreSQL</li><li>User accounts</li><li>Vercel or AWS</li><li>Response caching</li><li>LangChain</li>
+        </ul>
+        <p>Each is useful and none of them teaches retrieval. LangChain especially wraps the steps you are trying to see, so write them by hand first and bring it in once you know what it replaces.</p>
+      </aside>
+    </div>
+  </section>
+
+  <p class="foot">Chunk sizes, overlap, k and vector sizes on this board are starting points to test against your own question set. They are not rules.</p>
+</div>
+
+<script>
+(function () {
+  var KEY = "rag-whiteboard-steps";
+  var boxes = Array.prototype.slice.call(document.querySelectorAll("#steps input"));
+  var fill = document.getElementById("fill");
+  var count = document.getElementById("count");
+  function load() {
+    try { var v = JSON.parse(localStorage.getItem(KEY) || "[]"); return Array.isArray(v) ? v : []; } catch (e) { return []; }
+  }
+  function save() {
+    try { localStorage.setItem(KEY, JSON.stringify(boxes.filter(function (b) { return b.checked; }).map(function (b) { return b.id; }))); } catch (e) {}
+  }
+  function render() {
+    var done = boxes.filter(function (b) { return b.checked; }).length;
+    fill.style.width = (done / boxes.length * 100) + "%";
+    count.textContent = done + " of " + boxes.length + " done";
+  }
+  var saved = load();
+  boxes.forEach(function (b) {
+    b.checked = saved.indexOf(b.id) !== -1;
+    b.addEventListener("change", function () { save(); render(); });
+  });
+  render();
+})();
+</script>

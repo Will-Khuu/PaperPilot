@@ -147,3 +147,11 @@ vite.config.ts.timestamp-*
 
 # Turbo Repo
 .turbo
+
+# PaperPilot: local data and outputs
+.venv/
+__pycache__/
+out/
+papers/
+chroma_db/
+.DS_Store
