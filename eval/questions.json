@@ -1,0 +1,26 @@
+[
+  {"id": "q01", "type": "fact", "question": "How many layers are in the encoder stack?", "pages": [3], "phrase": "N = 6 identical layers"},
+  {"id": "q02", "type": "fact", "question": "What dropout rate does the base model use?", "pages": [8], "phrase": "Pdrop = 0.1"},
+  {"id": "q03", "type": "fact", "question": "How many steps were the big models trained for?", "pages": [7], "phrase": "300,000 steps"},
+  {"id": "q04", "type": "fact", "question": "What value of label smoothing was used?", "pages": [8], "phrase": "label smoothing of value"},
+
+  {"id": "q05", "type": "paraphrase", "question": "How does the model know the order of the words?", "pages": [6], "phrase": "relative or absolute position of the tokens"},
+  {"id": "q06", "type": "paraphrase", "question": "Why do they shrink the dot products before the softmax?", "pages": [4], "phrase": "extremely small gradients"},
+  {"id": "q07", "type": "paraphrase", "question": "How is the decoder stopped from peeking at later words?", "pages": [5], "phrase": "prevent leftward information flow"},
+  {"id": "q08", "type": "paraphrase", "question": "What did they do to avoid overfitting?", "pages": [7], "phrase": "three types of regularization"},
+
+  {"id": "q09", "type": "table", "question": "What BLEU score did the big model get on English-to-French?", "pages": [1, 8], "phrase": "41.8"},
+  {"id": "q10", "type": "table", "question": "How many FLOPs did it cost to train the base Transformer?", "pages": [8], "phrase": "3.3 · 1018"},
+  {"id": "q11", "type": "table", "question": "What BLEU score did ByteNet get on English-to-German?", "pages": [8], "phrase": "23.75"},
+  {"id": "q12", "type": "table", "question": "What is the per-layer complexity of self-attention?", "pages": [6], "phrase": "O(n2 · d)"},
+
+  {"id": "q13", "type": "concept", "question": "What is multi-head attention and why use it?", "pages": [5], "phrase": "different representation subspaces"},
+  {"id": "q14", "type": "concept", "question": "What does the feed-forward network in each layer consist of?", "pages": [5], "phrase": "two linear transformations with a ReLU activation"},
+  {"id": "q15", "type": "concept", "question": "In which three ways does the Transformer use attention?", "pages": [5], "phrase": "encoder-decoder attention"},
+  {"id": "q16", "type": "concept", "question": "How does the learning rate change during training?", "pages": [7], "phrase": "warmup_steps = 4000"},
+
+  {"id": "q17", "type": "relation", "question": "Who proposed scaled dot-product attention?", "pages": [1], "phrase": "Noam proposed scaled dot-product attention"},
+  {"id": "q18", "type": "relation", "question": "Who built the first Transformer models?", "pages": [1], "phrase": "Ashish, with Illia, designed and implemented"},
+  {"id": "q19", "type": "relation", "question": "Which earlier models also tried to reduce sequential computation?", "pages": [2], "phrase": "Extended Neural GPU"},
+  {"id": "q20", "type": "relation", "question": "What did the authors thank Nal Kalchbrenner and Stephan Gouws for?", "pages": [10], "phrase": "fruitful comments, corrections and inspiration"}
+]
