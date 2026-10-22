@@ -20,7 +20,8 @@ from chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 import ONNXMiniLM_L6_
 from step1_parse import clean, parse
 from step2_chunk import CHUNK_OVERLAP, CHUNK_SIZE, chunk
 
-DB_PATH = "chroma_db"
+DB_PATH = str(Path(__file__).parent / "chroma_db")
+EMPTY_INDEX = "the index is empty; run `python step3_embed.py ingest papers/attention.pdf` first"
 COLLECTION = "papers"
 
 TEST_QUESTIONS = [
@@ -41,8 +42,9 @@ def get_collection():
     The embedding function is attached to the collection, so the same model
     embeds chunks at ingest and questions at query time. Mixing models would
     put the two in different vector spaces and the distances would mean nothing.
-    Cosine distance, because Chroma defaults to L2 (straight-line distance),
-    which is also affected by vector length rather than only direction.
+    Cosine is explicit so ranking does not depend on the model normalizing
+    its vectors, and distances read on a fixed 0-2 scale. This model returns
+    unit-length vectors, so cosine and L2 rank results identically here.
     """
     client = chromadb.PersistentClient(path=DB_PATH)
     return client.get_or_create_collection(
@@ -109,6 +111,8 @@ def retrieve(question, k=5, paper_ids=None, include_references=False, collection
     where = None if not conditions else conditions[0] if len(conditions) == 1 else {"$and": conditions}
 
     collection = get_collection() if collection is None else collection
+    if collection.count() == 0:
+        raise RuntimeError(EMPTY_INDEX)
     found = collection.query(query_texts=[question], n_results=k, where=where)
     return [
         {"id": id_, "text": text, "distance": dist, **meta}
@@ -154,4 +158,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except RuntimeError as e:
+        sys.exit(str(e))

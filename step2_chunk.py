@@ -26,9 +26,11 @@ NAMED_HEADINGS = {"abstract", "acknowledgements", "acknowledgments", "references
 # Count with the embedding model's own tokenizer, because that's what the 256
 # limit is measured in. Step 2 first used words x 1.3, which undercounted
 # citations, numbers and symbols by up to 2x (15 of 49 chunks were over).
+EMBEDDING_MODEL = ONNXMiniLM_L6_V2()
+EMBEDDING_MODEL(["initialize tokenizer"])  # embedding once downloads the model; .tokenizer alone doesn't
 # This is a copy with truncation off, so long text counts in full and
 # Chroma's own tokenizer (which truncates at 256) is left untouched.
-TOKENIZER = Tokenizer.from_str(ONNXMiniLM_L6_V2().tokenizer.to_str())
+TOKENIZER = Tokenizer.from_str(EMBEDDING_MODEL.tokenizer.to_str())
 TOKENIZER.no_truncation()
 TOKENIZER.no_padding()
 

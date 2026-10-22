@@ -9,7 +9,7 @@ measured and swapped on its own. It currently works on *Attention Is All You Nee
 $ python step4_answer.py ask "How many attention heads does the Transformer use?"
 
 RETRIEVED
-  [1] attention-016  d=0.412  p. 5  3.2.2 Multi-Head Attention
+  [1] attention-019  d=0.411  p. 5  3.2.2 Multi-Head Attention
   ...
 
 ANSWER
@@ -17,7 +17,7 @@ The Transformer uses h = 8 parallel attention layers, or heads [1]. For each hea
 dk = dv = dmodel/h = 64 [1]. ...
 
 SOURCES
-  [1] Attention Is All You Need, 3.2.2 Multi-Head Attention, p. 5  (attention-016)
+  [1] Attention Is All You Need, 3.2.2 Multi-Head Attention, p. 5  (attention-019)
 ```
 
 ## How it works
@@ -56,14 +56,17 @@ SOURCES
   | Retrieved chunk contains the answer (40 overlap → 80) | 45% → 55% | 90% → 90% | 100% → 100% |
 
   Scoring the answer phrase as well as the page matters: for one table question, a chunk from the right page ranked
-  first while the chunk holding the number ranked ninth. The questions were written with the paper in hand, so these
+  first while the chunk holding the number ranked ninth with overlap 40. The questions were written with the paper in hand, so these
   numbers are optimistic.
 - **Chunk tuning:** a sweep of chunk sizes 100–256 and overlaps 0–80 (12 settings) moved rank-1 answer hits only
-  between 6 and 11 of 20, with no consistent trend. Overlap 80 met the decision rule set before the sweep (+2 answers
-  at rank 1, none lost from the top 5) and was adopted, but the gain is two questions, within noise. The finding is
+  between 6 and 11 of 20, with no consistent trend. Two settings, 220/80 and 100/80, met the decision rule set before the sweep (+2 answers
+  at rank 1, none lost from the top 5). After the run, 100/80 was set aside because its 80-token overlap on
+  roughly 90-token windows made 577 near-duplicate chunks and lost a question from the top 10. 220/80 was adopted,
+  but the gain is two questions, within noise. The finding is
   that chunking is not the bottleneck: the remaining misses come from paraphrased questions and ranking order, which
   point to a stronger embedding model or adding keyword search.
-- **Answers:** all 8 answered; all 17 cited claims were checked against the cited text and matched. For "What is BERT?"
+- **Answers:** all 8 answered; all 17 cited claims were checked against the cited text and matched
+  (measured on the earlier 220/40 index). For "What is BERT?"
   (not in the paper) the model declined instead of answering from training data.
 - **Known limits:** numbered footnotes can land in the wrong section's chunk, and table text loses its row and column
   structure.
@@ -78,7 +81,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 mkdir -p papers
-curl -L -o papers/attention.pdf https://arxiv.org/pdf/1706.03762
+curl -L -o papers/attention.pdf https://arxiv.org/pdf/1706.03762v7
 
 python step1_parse.py papers/attention.pdf           # parsed and cleaned text in out/
 python step2_chunk.py papers/attention.pdf           # chunks in out/attention.chunks.jsonl

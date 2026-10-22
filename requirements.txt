@@ -1,4 +1,6 @@
-pymupdf
-chromadb
-anthropic
-python-dotenv
+# Versions used for the published results (Python 3.9).
+PyMuPDF==1.26.5
+chromadb==1.5.9
+anthropic==0.125.0
+tokenizers==0.22.2
+onnxruntime==1.19.2

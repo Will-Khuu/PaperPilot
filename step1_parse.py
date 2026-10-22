@@ -134,6 +134,8 @@ def join_hyphen_breaks(lines, vocab):
     """
     lines = list(lines)
     for i in range(len(lines) - 1):
+        if lines[i] is None or lines[i + 1] is None:
+            continue
         line, nxt = lines[i].rstrip(), lines[i + 1].lstrip()
         if re.search(r"[A-Za-z]-$", line) and nxt[:1].isalpha():
             first, _, rest = nxt.partition(" ")

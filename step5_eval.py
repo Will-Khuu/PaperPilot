@@ -19,9 +19,10 @@ from pathlib import Path
 # step3_embed (Chroma, ONNX model) and step1_parse (PyMuPDF) are imported inside
 # the functions that use them, so selftest and the pure functions load with the stdlib only.
 
-QUESTIONS = Path("eval/questions.json")
-PAPER = "papers/attention.pdf"
-OUT_DIR = Path("out/eval")
+REPO_DIR = Path(__file__).parent
+QUESTIONS = REPO_DIR / "eval/questions.json"
+PAPER = REPO_DIR / "papers/attention.pdf"
+OUT_DIR = REPO_DIR / "out/eval"
 K = 10
 CUTOFFS = (1, 5, 10)
 
@@ -178,9 +179,11 @@ def score_questions(questions, collection=None):
 
 
 def run(label):
-    from step3_embed import get_collection
+    from step3_embed import EMPTY_INDEX, get_collection
 
     collection = get_collection()
+    if collection.count() == 0:
+        raise RuntimeError(EMPTY_INDEX)
     built_with = collection.metadata or {}
     if "chunk_size" not in built_with:
         sys.exit("the index doesn't record its chunk settings; "
@@ -217,4 +220,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except RuntimeError as e:
+        sys.exit(str(e))

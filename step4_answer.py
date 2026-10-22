@@ -57,16 +57,16 @@ Rules:
 # The paper's own citations: "[13]", "[35, 2, 5]". Left as-is, "additive
 # attention [2]" invites Claude to copy "[2]", which would map to excerpt 2:
 # a wrong Source that looks right. Out-of-range ones would at least be flagged.
-PAPER_CITATION = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
+PAPER_CITATION = re.compile(r"\[([\d\s,\-–]+)\]")
 
 # Bracket groups made only of digits, commas, spaces and dashes: [1], [1, 3], [1-3], [1–3].
-ANSWER_CITATION = re.compile(r"\[([\d\s,\-–]+)\]")
+ANSWER_CITATION = PAPER_CITATION
 MAX_RANGE = 50  # "[1-99999]" must not build a huge list
 
 
 def page_label(chunk):
-    """'p. 5' or 'pp. 5-6'. 12 of 62 chunks span two pages; the start page
-    alone would send the reader to the wrong page for the second half."""
+    """'p. 5' or 'pp. 5-6'. For chunks spanning pages, the start page alone
+    would send the reader to the wrong page for the second half."""
     if chunk["page"] == chunk["page_end"]:
         return f"p. {chunk['page']}"
     return f"pp. {chunk['page']}-{chunk['page_end']}"
@@ -115,10 +115,8 @@ def ask_claude(prompt):
     """
     import os
 
-    from dotenv import load_dotenv
     import anthropic
 
-    load_dotenv()
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise RuntimeError("ANTHROPIC_API_KEY is not set. Set it in the environment before running.")
     client = anthropic.Anthropic()
@@ -228,6 +226,10 @@ def selftest():
 
     assert rewrite_paper_citations("additive attention [2]") == "additive attention (ref 2)", "single paper citation"
     assert rewrite_paper_citations("[35, 2, 5]") == "(ref 35, 2, 5)", "list paper citation"
+    for form in ("[1]", "[1, 3]", "[1-3]", "[1–3]", "[ 2 ]", "[3-5]", "[1 3]"):
+        rewritten = rewrite_paper_citations(form)
+        assert rewritten == f"(ref {form[1:-1]})", f"paper citation {form} is rewritten"
+        assert not find_citations(rewritten), f"paper citation {form} cannot become an excerpt citation"
     cited_chunk = dict(chunks[0], text="3.2 Attention\nadditive attention [2] and [35, 2, 5].")
     excerpt_text = build_prompt("q?", [cited_chunk]).split("\n", 3)[3]
     assert not re.search(r"\[\d", excerpt_text), "no bracketed paper citation reaches Claude"
@@ -267,8 +269,8 @@ def main():
         from step3_embed import TEST_QUESTIONS, retrieve
 
         for question in TEST_QUESTIONS:
-            print(f"\n=== Q: {question}")
             chunks = retrieve(question, k=k)
+            print(f"\n=== Q: {question}")
             try:
                 answer, model = ask_claude(build_prompt(question, chunks))
             except RuntimeError as e:
@@ -283,4 +285,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except RuntimeError as e:
+        sys.exit(str(e))
