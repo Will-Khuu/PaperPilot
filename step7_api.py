@@ -10,10 +10,16 @@ from pathlib import Path
 from typing import List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, UploadFile, File
+from fastapi.responses import Response
 from pydantic import BaseModel, Field, field_validator
 
 from step3_embed import EMPTY_INDEX, get_collection, ingest, list_papers, retrieve
-from step4_answer import COMPARE_PROMPT, MODEL, ask_claude, build_prompt, check_answer, page_label, source_label
+from step4_answer import COMPARE_PROMPT, SUMMARY_PROMPT, SYSTEM_PROMPT, MODEL, ask_claude, build_prompt, check_answer, page_label, source_label
+
+from step9_summary import summarize
+import step10_notes as notes
+import step11_cache as cache
+from step11_cache import index_fingerprint
 
 app = FastAPI()
 PAPERS_DIR = Path(__file__).parent / "papers"
@@ -76,6 +82,47 @@ class Source(BaseModel):
     label: str
 
 
+class NoteSource(BaseModel):
+    n: int
+    label: str
+
+
+class NoteRequest(BaseModel):
+    paper_id: str
+    text: str = Field(min_length=1, max_length=5000)
+    question: Optional[str] = None
+    answer: Optional[str] = None
+    sources: Optional[List[NoteSource]] = None
+
+    @field_validator("text", mode="before")
+    @classmethod
+    def strip_text(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
+class SummaryRequest(BaseModel):
+    paper_id: str
+
+
+class SummarySource(BaseModel):
+    n: int
+    id: str
+    label: str
+
+
+class SummaryResult(BaseModel):
+    paper_id: str
+    title: str
+    summary: str
+    model: str
+    fallback: bool
+    sources: List[SummarySource]
+    invalid: List[int]
+    uncited: bool
+    chunks_used: int
+    cached: bool
+
+
 class SearchResult(BaseModel):
     question: str
     retrieved: List[Excerpt]
@@ -89,6 +136,7 @@ class AnswerResult(SearchResult):
     invalid: List[int]
     refused: bool
     uncited: bool
+    cached: bool
 
 
 def get_answerer():
@@ -154,6 +202,11 @@ async def upload_paper(file: UploadFile = File(...)):
 @app.post("/compare", response_model=AnswerResult)
 def compare(request: Comparison, answerer=Depends(get_answerer)):
     validate_papers(request.paper_ids)
+    key = cache.cache_key("compare", request.question, request.paper_ids, k_per_paper=request.k_per_paper,
+                          model=MODEL, prompt=COMPARE_PROMPT, fingerprint=index_fingerprint(request.paper_ids))
+    stored = cache.get(key, path=notes.DB_PATH)
+    if stored is not None:
+        return {**stored, "cached": True}
     chunks = []
     for pid in request.paper_ids:
         try:
@@ -163,7 +216,9 @@ def compare(request: Comparison, answerer=Depends(get_answerer)):
         if not found:
             raise HTTPException(status_code=422, detail=f"Paper {pid} has no searchable chunks")
         chunks.extend(found)
-    return answer_result(request, chunks, answerer, system=COMPARE_PROMPT)
+    result = answer_result(request, chunks, answerer, system=COMPARE_PROMPT)
+    cache.put(key, result.model_dump(), path=notes.DB_PATH)
+    return result
 
 
 @app.get("/health", response_model=Health)
@@ -181,8 +236,61 @@ def search(request: Question, chunks=Depends(get_chunks)):
 
 
 @app.post("/ask", response_model=AnswerResult)
-def ask(request: Question, chunks=Depends(get_chunks), answerer=Depends(get_answerer)):
-    return answer_result(request, chunks, answerer)
+def ask(request: Question, answerer=Depends(get_answerer)):
+    validate_papers(request.paper_ids)
+    key = cache.cache_key("ask", request.question, request.paper_ids, k=request.k,
+                          model=MODEL, prompt=SYSTEM_PROMPT, fingerprint=index_fingerprint(request.paper_ids))
+    stored = cache.get(key, path=notes.DB_PATH)
+    if stored is not None:
+        return {**stored, "cached": True}
+    result = answer_result(request, get_chunks(request), answerer)
+    cache.put(key, result.model_dump(), path=notes.DB_PATH)
+    return result
+
+
+@app.post("/notes")
+def save_note(request: NoteRequest):
+    validate_papers([request.paper_id])
+    return notes.add_note(**request.model_dump(), path=notes.DB_PATH)
+
+
+@app.get("/notes")
+def get_notes(paper_id: Optional[str] = None):
+    return notes.list_notes(paper_id, path=notes.DB_PATH)
+
+
+@app.get("/notes/export")
+def export_notes(paper_id: str):
+    validate_papers([paper_id])
+    title = next(p["title"] for p in list_papers() if p["paper_id"] == paper_id)
+    return Response(notes.export_markdown(paper_id, title, path=notes.DB_PATH), media_type="text/markdown",
+                    headers={"Content-Disposition": f'attachment; filename="notes-{paper_id}.md"'})
+
+
+@app.delete("/notes/{note_id}", status_code=204)
+def remove_note(note_id: int):
+    if not notes.delete_note(note_id, path=notes.DB_PATH):
+        raise HTTPException(status_code=404, detail="Note not found")
+    return Response(status_code=204)
+
+
+@app.post("/summarize", response_model=SummaryResult)
+def summarize_paper(request: SummaryRequest, answerer=Depends(get_answerer)):
+    collection = get_collection()
+    if collection.count() == 0:
+        raise HTTPException(status_code=503, detail=EMPTY_INDEX)
+    validate_papers([request.paper_id])
+    key = cache.cache_key("summary", paper_ids=[request.paper_id], model=MODEL, prompt=SUMMARY_PROMPT,
+                          fingerprint=index_fingerprint([request.paper_id], collection=collection))
+    stored = cache.get(key, path=notes.DB_PATH)
+    if stored is not None:
+        return {**stored, "cached": True}
+    try:
+        result = SummaryResult(**summarize(request.paper_id, answerer=answerer, collection=collection), cached=False)
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail=str(e)) from None
+    cache.put(key, result.model_dump(), path=notes.DB_PATH)
+    return result
 
 
 def answer_result(request, chunks, answerer, system=None):
@@ -196,12 +304,13 @@ def answer_result(request, chunks, answerer, system=None):
                       paper_id=chunks[n - 1]["paper_id"], title=chunks[n - 1]["title"])
                for n in checked.pop("cited")]
     return AnswerResult(question=request.question, answer=answer, model=model,
-                        fallback=model != MODEL, retrieved=excerpts(chunks), sources=sources, **checked)
+                        fallback=model != MODEL, retrieved=excerpts(chunks), sources=sources, cached=False, **checked)
 
 
 def selftest():
     """Offline local server tests; requires the real index built by step3 ingest."""
     from unittest.mock import patch
+    from tempfile import TemporaryDirectory
 
     from fastapi.testclient import TestClient
     from step4_answer import NOT_COVERED
@@ -214,16 +323,16 @@ def selftest():
     def fake_answerer(prompt, system=None):
         prompts.append(prompt)
         if system is not None:
-            assert system == COMPARE_PROMPT
+            assert system in (COMPARE_PROMPT, SUMMARY_PROMPT)
         return tuple(reply)
 
-    def fail_answerer(prompt):
+    def fail_answerer(prompt, system=None):
         raise RuntimeError("The answer was cut off.")
 
     previous = app.dependency_overrides.copy()
     app.dependency_overrides[get_answerer] = lambda: fake_answerer
     try:
-        with TestClient(app) as client:
+        with TemporaryDirectory() as directory, patch.object(notes, "DB_PATH", Path(directory) / "notes.db"), TestClient(app) as client:
             response = client.get("/health")
             assert response.status_code == 200, "health reads the real index"
             assert response.json() == {"chunks": get_collection().count(), **get_collection().metadata}, \
@@ -250,10 +359,29 @@ def selftest():
             ], "citations map to the same numbered excerpts, sorted and deduplicated"
             assert result["invalid"] == [99] and result["fallback"], "invalid citations and fallback are flagged"
             assert prompts[-1] == build_prompt(question, found), "answerer gets the existing numbered prompt"
+            assert result["cached"] is False
+            with patch(__name__ + ".retrieve", side_effect=AssertionError("cache hit retrieved chunks")):
+                repeated = client.post("/ask", json=payload).json()
+                assert repeated == {**result, "cached": True} and len(prompts) == 1
+                spaced = client.post("/ask", json={**payload, "question": "  How  many attention heads does the Transformer use?  "})
+                assert spaced.json()["cached"] is True and len(prompts) == 1
+            for changed in ({**payload, "question": "What optimizer was used?"}, {**payload, "k": 2},
+                            {**payload, "paper_ids": ["attention"]}):
+                before = len(prompts)
+                response = client.post("/ask", json=changed)
+                assert response.status_code == 200 and response.json()["cached"] is False
+                assert len(prompts) == before + 1, "question, k and filter each miss"
+            with patch(__name__ + ".index_fingerprint", return_value="changed-index") as fingerprint:
+                before = len(prompts)
+                assert client.post("/ask", json=payload).json()["cached"] is False
+                fingerprint.assert_called_once_with(None)
+                assert len(prompts) == before + 1, "all-papers fingerprint changes miss"
+            cache.clear(path=notes.DB_PATH)
             reply[:] = [NOT_COVERED, MODEL]
             result = client.post("/ask", json=payload).json()
             assert result["refused"] and not result["sources"] and not result["uncited"], "refusal has no sources"
             assert not result["fallback"], "primary model is not a fallback"
+            cache.clear(path=notes.DB_PATH)
             reply[0] = "Plain prose."
             assert client.post("/ask", json=payload).json()["uncited"], "plain prose is uncited"
             for endpoint in ("/search", "/ask"):
@@ -276,18 +404,103 @@ def selftest():
             assert [c["n"] for c in result["retrieved"]] == list(range(1, 7))
             assert [c["paper_id"] for c in result["retrieved"]] == [ids[0]] * 3 + [ids[1]] * 3
             assert [c["paper_id"] for c in result["sources"]] == ids
+            assert result["cached"] is False
+            before = len(prompts)
+            assert client.post("/compare", json={"question": question, "paper_ids": ids}).json()["cached"] is True
+            assert len(prompts) == before, "repeated comparisons skip the answerer"
+            reversed_result = client.post("/compare", json={"question": question, "paper_ids": ids[::-1]}).json()
+            assert reversed_result["cached"] is False and len(prompts) == before + 1
+            assert [c["paper_id"] for c in reversed_result["retrieved"]] == [ids[1]] * 3 + [ids[0]] * 3
+            before = len(prompts)
+            assert client.post("/ask", json={**payload, "paper_ids": ids}).json()["cached"] is False
+            assert client.post("/ask", json={**payload, "paper_ids": ids[::-1]}).json()["cached"] is True
+            assert len(prompts) == before + 1, "ask filters are unordered"
             for bad_ids in ([pid], [pid] * 5, [pid, pid]):
                 assert client.post("/compare", json={"question": question, "paper_ids": bad_ids}).status_code == 422
             for k in (0, 6):
                 assert client.post("/compare", json={"question": question, "paper_ids": ids,
                                                     "k_per_paper": k}).status_code == 422
+            cache.clear(path=notes.DB_PATH)
             with patch(__name__ + ".retrieve", return_value=[]):
                 assert client.post("/compare", json={"question": question, "paper_ids": ids}).status_code == 422
+            from step9_summary import paper_excerpts
+
+            reply[:] = ["Overview [1].\n\nTakeaway [2].\nTakeaway [999].", "fake-model"]
+            response = client.post("/summarize", json={"paper_id": pid})
+            assert response.status_code == 200, "summarize uses the injected offline answerer"
+            result = response.json()
+            chunks = paper_excerpts(pid)
+            assert result["sources"] == [
+                {"n": n, "id": chunks[n - 1]["id"], "label": source_label(chunks[n - 1])}
+                for n in (1, 2)
+            ], "summary citations map to the paper's reading order"
+            assert result["invalid"] == [999] and result["fallback"], "summary warnings survive serialization"
+            assert result["chunks_used"] == len(chunks) and "refused" not in result
+            assert prompts[-1] == build_prompt(f"Summarize this paper: {result['title']}", chunks)
+            assert result["cached"] is False
+            before = len(prompts)
+            with patch(__name__ + ".summarize", side_effect=AssertionError("cache hit summarized")):
+                repeated = client.post("/summarize", json={"paper_id": pid}).json()
+                assert repeated == {**result, "cached": True} and len(prompts) == before
+            cache.clear(path=notes.DB_PATH)
+            reply[:] = ["Plain prose.", MODEL]
+            result = client.post("/summarize", json={"paper_id": pid}).json()
+            assert result["uncited"] and not result["fallback"], "uncited summaries are flagged"
+            response = client.post("/summarize", json={"paper_id": "unknown"})
+            assert response.status_code == 422 and all(p["paper_id"] in response.json()["detail"] for p in indexed), \
+                "unknown summary paper lists known ids"
+            for invalid in ({}, {"paper_id": None}, {"paper_id": 1}):
+                assert client.post("/summarize", json=invalid).status_code == 422, "summary needs a string paper id"
+            with patch(__name__ + ".get_collection") as empty_collection:
+                empty_collection.return_value.count.return_value = 0
+                response = client.post("/summarize", json={"paper_id": pid})
+                assert response.status_code == 503 and response.json() == {"detail": EMPTY_INDEX}, \
+                    "empty summary index returns 503 before paper validation"
+            note_payload = {"paper_id": pid, "text": "  It's a note  ", "question": question,
+                            "answer": "Eight [1].", "sources": [{"n": 1, "label": "Page 1"}]}
+            saved = client.post("/notes", json=note_payload).json()
+            assert saved["text"] == "It's a note" and saved["sources"] == note_payload["sources"]
+            assert client.get("/notes", params={"paper_id": pid}).json() == [saved]
+            assert client.get("/notes").json() == [saved]
+            for text in (" ", "x" * 5001):
+                assert client.post("/notes", json={**note_payload, "text": text}).status_code == 422
+            assert client.post("/notes", json={**note_payload, "paper_id": "unknown"}).status_code == 422
+            assert client.get("/notes/export", params={"paper_id": "unknown"}).status_code == 422
+            exported = client.get("/notes/export", params={"paper_id": pid})
+            assert exported.status_code == 200 and exported.headers["content-type"].startswith("text/markdown")
+            assert f'notes-{pid}.md' in exported.headers["content-disposition"]
+            assert "It's a note" in exported.text and "Sources:" in exported.text
+            assert client.delete(f"/notes/{saved['id']}").status_code == 204
+            assert client.delete(f"/notes/{saved['id']}").status_code == 404
+            assert client.get("/notes").json() == []
             test_uploads(client, indexed)
+            cache.clear(path=notes.DB_PATH)
+            failures = []
+
+            def counting_failure(prompt, system=None):
+                failures.append(prompt)
+                return fail_answerer(prompt, system=system)
+
+            app.dependency_overrides[get_answerer] = lambda: counting_failure
+            for endpoint, body in (("/ask", payload), ("/compare", {"question": question, "paper_ids": ids}),
+                                   ("/summarize", {"paper_id": pid})):
+                before = len(failures)
+                for _ in range(2):
+                    response = client.post(endpoint, json=body)
+                    assert response.status_code == 502 and response.json() == {"detail": "The answer was cut off."}
+                assert len(failures) == before + 2, "answerer errors retry instead of being cached"
+                app.dependency_overrides[get_answerer] = lambda: fake_answerer
+                assert client.post(endpoint, json=body).json()["cached"] is False, "success after error is a miss"
+                assert client.post(endpoint, json=body).json()["cached"] is True
+                app.dependency_overrides[get_answerer] = lambda: counting_failure
+            cache.clear(path=notes.DB_PATH)
             app.dependency_overrides[get_answerer] = lambda: fail_answerer
             response = client.post("/ask", json=payload)
             assert response.status_code == 502 and response.json() == {"detail": "The answer was cut off."}, \
                 "answerer RuntimeError becomes 502 with its message"
+            response = client.post("/summarize", json={"paper_id": pid})
+            assert response.status_code == 502 and response.json() == {"detail": "The answer was cut off."}, \
+                "summary answerer errors return 502 with their message"
             with patch(__name__ + ".retrieve", side_effect=RuntimeError(EMPTY_INDEX)):
                 for endpoint in ("/search", "/ask"):
                     response = client.post(endpoint, json=payload)

@@ -155,3 +155,6 @@ out/
 papers/
 chroma_db/
 .DS_Store
+
+# Local notes database
+data/

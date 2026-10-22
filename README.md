@@ -32,6 +32,9 @@ SOURCES
 | 6. Tune | `step6_sweep.py` | Re-scores 12 chunk size and overlap settings in throwaway indexes and applies a decision rule fixed before the run. |
 | 7. Serve | `step7_api.py`, `step7_ui.py` | FastAPI server (/health, /search, /ask) and a Streamlit chat page that shows answers with their sources and the retrieved excerpts. |
 | 8. Several papers | `step3_embed.py`, `step7_api.py`, `step7_ui.py` | Filter retrieval by paper, compare 2-4 papers, and upload PDFs into the shared index. |
+| 9. Summaries | `step9_summary.py`, `step7_api.py`, `step7_ui.py` | Summarize one paper from its chunks in reading order, with citations to sections and pages. |
+| 10. Notes | `step10_notes.py`, `step7_api.py`, `step7_ui.py` | Save answers and free-text notes per paper in SQLite, delete notes, and export Markdown. |
+| 11. Caching | `step11_cache.py`, `step7_api.py`, `step7_ui.py` | Cache exact-match answers, comparisons and summaries in SQLite. Entries become stale when indexed paper chunk IDs, chunk settings, the prompt or model change. |
 
 ## Design decisions
 
@@ -120,6 +123,9 @@ The chat page uses `PAPERPILOT_API` if set, otherwise `http://127.0.0.1:8000`.
 - [x] Tune chunk size and overlap against that baseline (marginal gain; chunking is not the bottleneck)
 - [x] FastAPI backend and Streamlit chat UI
 - [x] Multiple papers and a compare mode
+- [x] Paper summaries with citations
+- [x] Notes per paper with Markdown export
+- [x] Exact-match caching for answers, comparisons and summaries
 
 ## License
 
