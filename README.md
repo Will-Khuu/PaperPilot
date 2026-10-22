@@ -25,10 +25,11 @@ SOURCES
 | Stage | Script | What it does |
 | --- | --- | --- |
 | 1. Parse | `step1_parse.py` | Extracts text page by page with PyMuPDF, then applies narrow cleaning rules: drops page numbers and figure noise, rejoins split words and section headings. |
-| 2. Chunk | `step2_chunk.py` | Splits at section headings, then into overlapping windows of at most 220 tokens (40 overlap). Each chunk keeps its section and page range. |
+| 2. Chunk | `step2_chunk.py` | Splits at section headings, then into overlapping windows of at most 220 tokens (80 overlap). Each chunk keeps its section and page range. |
 | 3. Embed and retrieve | `step3_embed.py` | Embeds chunks with all-MiniLM-L6-v2 into a local Chroma collection (cosine distance) and returns the closest chunks to a question. |
 | 4. Answer | `step4_answer.py` | Sends the top 5 chunks to Claude as numbered excerpts. The answer cites `[n]`, and each `[n]` is mapped back to its section and page. |
 | 5. Evaluate | `step5_eval.py` | Scores retrieval on 20 labeled questions: hit rate at 1, 5 and 10, by page and by answer phrase, per question type. |
+| 6. Tune | `step6_sweep.py` | Re-scores 12 chunk size and overlap settings in throwaway indexes and applies a decision rule fixed before the run. |
 
 ## Design decisions
 
@@ -47,17 +48,21 @@ SOURCES
 ## Results so far
 
 - **Retrieval** on 20 labeled questions (4 each: fact, paraphrase, table number, concept, who/relation), at
-  220-token chunks with 40 overlap:
+  220-token chunks:
 
   | | Hit rate at 1 | Hit rate at 5 | Hit rate at 10 |
   | --- | --- | --- | --- |
-  | Right page retrieved | 60% | 95% | 100% |
-  | Retrieved chunk contains the answer | 45% | 90% | 100% |
+  | Right page retrieved (40 overlap → 80) | 60% → 70% | 95% → 90% | 100% → 100% |
+  | Retrieved chunk contains the answer (40 overlap → 80) | 45% → 55% | 90% → 90% | 100% → 100% |
 
-  The only top-5 miss is a paraphrased question ("How does the model know the order of the words?" vs. the paper's
-  "positional encoding"). Scoring the answer phrase as well as the page matters: for one table question, a chunk from
-  the right page ranked first while the chunk holding the number ranked ninth. The questions were written with the
-  paper in hand, so these numbers are optimistic; the main gap is getting the answer chunk ranked first.
+  Scoring the answer phrase as well as the page matters: for one table question, a chunk from the right page ranked
+  first while the chunk holding the number ranked ninth. The questions were written with the paper in hand, so these
+  numbers are optimistic.
+- **Chunk tuning:** a sweep of chunk sizes 100–256 and overlaps 0–80 (12 settings) moved rank-1 answer hits only
+  between 6 and 11 of 20, with no consistent trend. Overlap 80 met the decision rule set before the sweep (+2 answers
+  at rank 1, none lost from the top 5) and was adopted, but the gain is two questions, within noise. The finding is
+  that chunking is not the bottleneck: the remaining misses come from paraphrased questions and ranking order, which
+  point to a stronger embedding model or adding keyword search.
 - **Answers:** all 8 answered; all 17 cited claims were checked against the cited text and matched. For "What is BERT?"
   (not in the paper) the model declined instead of answering from training data.
 - **Known limits:** numbered footnotes can land in the wrong section's chunk, and table text loses its row and column
@@ -85,7 +90,8 @@ python step4_answer.py ask "What is scaled dot-product attention?"
 python step4_answer.py ask "..." --dry-run           # print the exact prompt, no API call
 python step4_answer.py selftest                      # offline checks, no API key needed
 
-python step5_eval.py run --label baseline            # retrieval scores, saved to out/eval/baseline.json
+python step5_eval.py run --label current             # retrieval scores, saved to out/eval/current.json
+python step6_sweep.py run                            # 12 chunk settings, saved to out/eval/sweep.json
 ```
 
 ## Roadmap
@@ -93,7 +99,7 @@ python step5_eval.py run --label baseline            # retrieval scores, saved t
 - [x] Parse, chunk, embed, retrieve
 - [x] Answers with page-level citations
 - [x] Evaluation set of 20 questions with known answer pages; hit rate at 1, 5 and 10
-- [ ] Tune chunk size and overlap against that baseline, aiming at rank-1 precision
+- [x] Tune chunk size and overlap against that baseline (marginal gain; chunking is not the bottleneck)
 - [ ] FastAPI backend and Streamlit chat UI
 - [ ] Multiple papers and a compare mode
 

@@ -2,6 +2,7 @@
 
 Usage:
     python step3_embed.py ingest papers/attention.pdf      # (re)build this paper's chunks in chroma_db/
+    python step3_embed.py ingest papers/attention.pdf --size 160 --overlap 80
     python step3_embed.py ask "how many attention heads?"  # top 5 with distances
     python step3_embed.py ask "..." --k 10 --with-references
     python step3_embed.py demo                             # the eight test questions
@@ -17,7 +18,7 @@ import chromadb
 from chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 import ONNXMiniLM_L6_V2
 
 from step1_parse import clean, parse
-from step2_chunk import chunk
+from step2_chunk import CHUNK_OVERLAP, CHUNK_SIZE, chunk
 
 DB_PATH = "chroma_db"
 COLLECTION = "papers"
@@ -51,36 +52,54 @@ def get_collection():
     )
 
 
-def ingest(pdf_path):
+CHUNK_FIELDS = ("paper_id", "title", "section", "page", "page_end", "chunk_index")
+
+
+def paper_chunks(pdf_path, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
+    path = Path(pdf_path)
+    pages = clean(parse(path))
+    title = pages[0]["text"].splitlines()[0].strip()
+    return chunk(pages, paper_id=path.stem, title=title, size=size, overlap=overlap)
+
+
+def add_chunks(collection, chunks):
+    collection.add(
+        ids=[c["id"] for c in chunks],
+        documents=[c["text"] for c in chunks],
+        metadatas=[{k: c[k] for k in CHUNK_FIELDS} for c in chunks],
+    )
+
+
+def ingest(pdf_path, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
     """Delete this paper's old chunks, then add the new ones.
 
     Re-chunking can change how many chunks a paper has. A plain overwrite by
     id would leave stale ones behind (60 old, 55 new: 5 ghosts that still show
     up in search). Delete-then-add gives the same result however often it runs.
-    """
-    path = Path(pdf_path)
-    pages = clean(parse(path))
-    title = pages[0]["text"].splitlines()[0].strip()
-    chunks = chunk(pages, paper_id=path.stem, title=title)
 
+    The chunk settings go on the collection itself, so anything reading the
+    index (Step 5's eval) learns how it was built from the index, not from
+    chunk()'s current defaults. They are per collection, not per paper: every
+    paper is meant to be ingested with the same settings.
+    """
+    chunks = paper_chunks(pdf_path, size=size, overlap=overlap)
+    paper_id = Path(pdf_path).stem
     collection = get_collection()
-    collection.delete(where={"paper_id": path.stem})
-    collection.add(
-        ids=[c["id"] for c in chunks],
-        documents=[c["text"] for c in chunks],
-        metadatas=[{k: c[k] for k in ("paper_id", "title", "section", "page", "page_end", "chunk_index")}
-                   for c in chunks],
-    )
+    collection.delete(where={"paper_id": paper_id})
+    add_chunks(collection, chunks)
+    collection.modify(metadata={"chunk_size": size, "chunk_overlap": overlap})
     return len(chunks)
 
 
-def retrieve(question, k=5, paper_ids=None, include_references=False):
+def retrieve(question, k=5, paper_ids=None, include_references=False, collection=None):
     """Return the k chunks closest to the question, closest first.
 
     Each result: {"id", "text", "distance", and the chunk's metadata}.
     References are left out by default: their titles share words with real
     questions ("attention", "translation") and would take top-k slots from
     chunks that actually answer.
+
+    `collection` defaults to the real index; Step 6 passes throwaway ones.
     """
     conditions = []
     if paper_ids:
@@ -89,7 +108,8 @@ def retrieve(question, k=5, paper_ids=None, include_references=False):
         conditions.append({"section": {"$ne": "References"}})
     where = None if not conditions else conditions[0] if len(conditions) == 1 else {"$and": conditions}
 
-    found = get_collection().query(query_texts=[question], n_results=k, where=where)
+    collection = get_collection() if collection is None else collection
+    found = collection.query(query_texts=[question], n_results=k, where=where)
     return [
         {"id": id_, "text": text, "distance": dist, **meta}
         for id_, text, dist, meta in zip(found["ids"][0], found["documents"][0],
@@ -112,10 +132,12 @@ def main():
     command = sys.argv[1]
 
     if command == "ingest":
-        n = ingest(sys.argv[2])
+        size = int(sys.argv[sys.argv.index("--size") + 1]) if "--size" in sys.argv else CHUNK_SIZE
+        overlap = int(sys.argv[sys.argv.index("--overlap") + 1]) if "--overlap" in sys.argv else CHUNK_OVERLAP
+        n = ingest(sys.argv[2], size=size, overlap=overlap)
         collection = get_collection()
         print(f"ingested {n} chunks from {sys.argv[2]}; collection now holds {collection.count()}")
-        print(f"distance: {collection.configuration['hnsw']['space']}")
+        print(f"distance: {collection.configuration['hnsw']['space']}; chunk settings: {collection.metadata}")
     elif command == "ask":
         k = int(sys.argv[sys.argv.index("--k") + 1]) if "--k" in sys.argv else 5
         question = sys.argv[2]

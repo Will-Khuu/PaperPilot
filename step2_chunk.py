@@ -1,7 +1,7 @@
 """Step 2: cut one paper into chunks at section headings and look at them.
 
 Usage:
-    python step2_chunk.py papers/attention.pdf                  # 220 tokens, 40 overlap
+    python step2_chunk.py papers/attention.pdf                  # 220 tokens, 80 overlap
     python step2_chunk.py papers/attention.pdf --size 600 --overlap 80
 
 Prints every chunk (id, section, pages, size, start of text) and writes them
@@ -93,7 +93,15 @@ def split_sections(pages):
     return [{"section": name, "words": words} for name, words in sections.items() if words]
 
 
-def chunk(pages, paper_id, title, size=220, overlap=40):
+# The one place the chunk settings are decided; step3 imports these.
+# 220 fits the embedding model's 256 limit with margin. Overlap 80 won Step 6's
+# sweep by the pre-set rule (+2 answers at rank 1, none lost from the top 5),
+# a marginal gain at the noise level of 20 questions.
+CHUNK_SIZE = 220
+CHUNK_OVERLAP = 80
+
+
+def chunk(pages, paper_id, title, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
     """Cut each section into windows of about `size` tokens.
 
     A chunk never crosses a section boundary. A long section is cut into
@@ -146,8 +154,8 @@ def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
     path = Path(sys.argv[1])
-    size = int(sys.argv[sys.argv.index("--size") + 1]) if "--size" in sys.argv else 220
-    overlap = int(sys.argv[sys.argv.index("--overlap") + 1]) if "--overlap" in sys.argv else 40
+    size = int(sys.argv[sys.argv.index("--size") + 1]) if "--size" in sys.argv else CHUNK_SIZE
+    overlap = int(sys.argv[sys.argv.index("--overlap") + 1]) if "--overlap" in sys.argv else CHUNK_OVERLAP
 
     pages = clean(parse(path))
     # The PDF's title metadata is often empty (it is for this paper), so use

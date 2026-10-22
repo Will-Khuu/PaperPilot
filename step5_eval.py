@@ -11,14 +11,13 @@ on the right page may still not contain the answer. A phrase hit means the
 chunk's text contains the answer phrase; stricter, it proves the answer was
 actually in front of the model.
 """
-import inspect
 import json
 import sys
 import time
 from pathlib import Path
 
 # step3_embed (Chroma, ONNX model) and step1_parse (PyMuPDF) are imported inside
-# main()'s branches, so selftest and the pure functions load with the stdlib only.
+# the functions that use them, so selftest and the pure functions load with the stdlib only.
 
 QUESTIONS = Path("eval/questions.json")
 PAPER = "papers/attention.pdf"
@@ -151,10 +150,9 @@ def selftest():
     assert "-" in format_table(rows).splitlines()[1], "missing rank shown as -"
 
 
-def run(label):
+def checked_questions():
+    """Load the questions and stop the run if any label doesn't match the paper."""
     from step1_parse import clean, parse
-    from step2_chunk import chunk
-    from step3_embed import get_collection, retrieve
 
     questions = json.loads(QUESTIONS.read_text(encoding="utf-8"))
     bad = bad_labels(questions, clean(parse(PAPER)))
@@ -163,27 +161,45 @@ def run(label):
             print(f"bad label {qid}: labeled pages {labeled}, phrase found on {found}")
         sys.exit(f"{len(bad)} bad labels; fix eval/questions.json before scoring")
     print(f"labels: {len(questions)} checked, 0 bad\n")
+    return questions
+
+
+def score_questions(questions, collection=None):
+    """One row per question: its first page-hit and phrase-hit rank in the top K.
+    `collection` defaults to the real index; Step 6 passes throwaway ones."""
+    from step3_embed import retrieve
 
     rows = []
     for q in questions:
-        results = retrieve(q["question"], k=K)
+        results = retrieve(q["question"], k=K, collection=collection)
         rows.append({"id": q["id"], "type": q["type"], "question": q["question"],
                      "ranks": {test: first_hit_rank(results, q, hit) for test, hit in HIT_TESTS.items()}})
+    return rows
+
+
+def run(label):
+    from step3_embed import get_collection
+
+    collection = get_collection()
+    built_with = collection.metadata or {}
+    if "chunk_size" not in built_with:
+        sys.exit("the index doesn't record its chunk settings; "
+                 "re-ingest with: python step3_embed.py ingest papers/attention.pdf")
+
+    questions = checked_questions()
+    rows = score_questions(questions, collection)
     summary = summarize(rows)
     print(format_table(rows))
     print()
     print(format_summary(summary))
 
-    # Read from chunk()'s defaults, which assumes the index was built with them
-    # (step3_embed.ingest passes none). Step 6 must re-ingest after changing them.
-    defaults = inspect.signature(chunk).parameters
-    settings = {"k": K, "chunks": get_collection().count(),
-                "chunk_size": defaults["size"].default, "chunk_overlap": defaults["overlap"].default}
+    settings = {"k": K, "chunks": collection.count(),
+                "chunk_size": built_with["chunk_size"], "chunk_overlap": built_with["chunk_overlap"]}
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     out_file = OUT_DIR / f"{label or time.strftime('%Y%m%d-%H%M%S')}.json"
     out_file.write_text(json.dumps({"settings": settings, "questions": rows, "summary": summary}, indent=2),
                         encoding="utf-8")
-    print(f"\nsettings: {settings}")
+    print(f"\nsettings (from the index): {settings}")
     print(f"results written to {out_file}")
 
 
