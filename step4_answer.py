@@ -165,25 +165,34 @@ def find_citations(answer):
     return numbers
 
 
+def check_answer(chunks, answer):
+    """Return valid and invalid citation numbers and answer warnings."""
+    numbers = find_citations(answer)
+    refused = answer == NOT_COVERED
+    return {
+        "cited": sorted({n for n in numbers if source_for(n, chunks)}),
+        "invalid": sorted({n for n in numbers if not source_for(n, chunks)}),
+        "refused": refused,
+        "uncited": not numbers and not refused,
+    }
+
+
 def format_report(chunks, answer, model=None):
     """Retrieved chunks, answer and Sources as one string, so selftest can assert on it."""
-    numbers = find_citations(answer)
-    cited = sorted({n for n in numbers if source_for(n, chunks)})
-    invalid = sorted({n for n in numbers if not source_for(n, chunks)})
-    refused = answer.strip() == NOT_COVERED
+    checked = check_answer(chunks, answer.strip())
 
     lines = ["RETRIEVED"]
     for n, chunk in enumerate(chunks, start=1):
         lines.append(f"  [{n}] {chunk['id']}  d={chunk['distance']:.3f}  {page_label(chunk)}  {chunk['section']}")
     lines += ["", "ANSWER", answer, "", "SOURCES"]
-    for n in cited:
+    for n in checked["cited"]:
         chunk = source_for(n, chunks)
         lines.append(f"  [{n}] {source_label(chunk)}  ({chunk['id']})")
-    for n in invalid:
+    for n in checked["invalid"]:
         lines.append(f"  [{n}] NOT A RETRIEVED EXCERPT (only [1]-[{len(chunks)}] were given)")
-    if refused:
+    if checked["refused"]:
         lines.append("  (the excerpts did not cover the question; no sources)")
-    elif not numbers:
+    elif checked["uncited"]:
         # The BERT/footnote failure mode: an uncited answer most likely came from training data.
         lines.append("  WARNING: no citations. This may come from outside knowledge.")
     if model and model != MODEL:
@@ -211,6 +220,15 @@ def selftest():
     assert find_citations("[1-3] [2–4]") == [1, 2, 3, 2, 3, 4], "hyphen and en-dash ranges"
     assert len(find_citations("[1-99999]")) == MAX_RANGE, "ranges are capped"
     assert find_citations("[1 3]") == [1, 3], "space-separated numbers do not crash the parser"
+
+    assert check_answer(chunks, "[3][2][3][7][0][7]") == {
+        "cited": [2, 3], "invalid": [0, 7], "refused": False, "uncited": False,
+    }, "citation lists are sorted, unique, and separate invalid numbers"
+    assert check_answer(chunks, NOT_COVERED) == {
+        "cited": [], "invalid": [], "refused": True, "uncited": False,
+    }, "exact refusal has no sources and is not uncited"
+    assert check_answer(chunks, "Plain prose.")["uncited"], "prose without citations is flagged"
+    assert not check_answer(chunks, NOT_COVERED + " ")["refused"], "refusal requires exact equality"
 
     report = format_report(chunks, "Yes [0][2][2][7].")
     assert "[0] NOT A RETRIEVED EXCERPT" in report, "[0] is invalid, not chunks[-1]"

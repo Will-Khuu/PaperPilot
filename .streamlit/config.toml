@@ -1,0 +1,7 @@
+[server]
+# Keep the chat page accessible only from this machine.
+address = "127.0.0.1"
+
+[browser]
+# Keep local usage from being sent to Streamlit.
+gatherUsageStats = false

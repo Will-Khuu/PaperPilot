@@ -30,6 +30,7 @@ SOURCES
 | 4. Answer | `step4_answer.py` | Sends the top 5 chunks to Claude as numbered excerpts. The answer cites `[n]`, and each `[n]` is mapped back to its section and page. |
 | 5. Evaluate | `step5_eval.py` | Scores retrieval on 20 labeled questions: hit rate at 1, 5 and 10, by page and by answer phrase, per question type. |
 | 6. Tune | `step6_sweep.py` | Re-scores 12 chunk size and overlap settings in throwaway indexes and applies a decision rule fixed before the run. |
+| 7. Serve | `step7_api.py`, `step7_ui.py` | FastAPI server (/health, /search, /ask) and a Streamlit chat page that shows answers with their sources and the retrieved excerpts. |
 
 ## Design decisions
 
@@ -97,13 +98,26 @@ python step5_eval.py run --label current             # retrieval scores, saved t
 python step6_sweep.py run                            # 12 chunk settings, saved to out/eval/sweep.json
 ```
 
+Start the API with the key in the environment, then start the chat page in a second terminal
+with the virtual environment activated:
+
+```bash
+python step7_api.py serve
+# Second terminal:
+streamlit run step7_ui.py
+```
+
+Both servers run on this machine only (127.0.0.1). Search only needs no API key.
+The chat page's address comes from `.streamlit/config.toml`.
+The chat page uses `PAPERPILOT_API` if set, otherwise `http://127.0.0.1:8000`.
+
 ## Roadmap
 
 - [x] Parse, chunk, embed, retrieve
 - [x] Answers with page-level citations
 - [x] Evaluation set of 20 questions with known answer pages; hit rate at 1, 5 and 10
 - [x] Tune chunk size and overlap against that baseline (marginal gain; chunking is not the bottleneck)
-- [ ] FastAPI backend and Streamlit chat UI
+- [x] FastAPI backend and Streamlit chat UI
 - [ ] Multiple papers and a compare mode
 
 ## License
