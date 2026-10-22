@@ -22,9 +22,48 @@ import pymupdf  # PyMuPDF
 
 
 def parse(pdf_path):
-    """Return one dict per page: {"page": 1-based page number, "text": str}."""
-    doc = pymupdf.open(pdf_path)
-    return [{"page": i, "text": page.get_text()} for i, page in enumerate(doc, start=1)]
+    """Return page numbers, body text and layout-separated footnotes."""
+    pages = []
+    with pymupdf.open(pdf_path) as doc:
+        for i, page in enumerate(doc, start=1):
+            blocks = [b for b in page.get_text("dict")["blocks"] if b["type"] == 0]
+            sizes = Counter()
+            for block in blocks:
+                for line in block["lines"]:
+                    for span in line["spans"]:
+                        sizes[round(span["size"])] += len(span["text"])
+            body_size = sizes.most_common(1)[0][0] if sizes else 0
+            body, footnotes = [], []
+            for block in blocks:
+                text = "".join("".join(s["text"] for s in line["spans"]) + "\n"
+                               for line in block["lines"])
+                target = footnotes if is_footnote(block, body_size, page.rect.height) else body
+                target.append(text)
+            pages.append({"page": i, "text": "".join(body), "footnotes": "".join(footnotes)})
+    return pages
+
+
+def is_footnote(block, body_size, page_height):
+    spans = [s for line in block["lines"] for s in line["spans"] if s["text"].strip()]
+    if not spans or block["bbox"][1] < page_height * 0.7:
+        return False
+    text = "".join(s["text"] for s in block["lines"][0]["spans"]).lstrip()
+    marked = spans[0]["flags"] & 1 or re.match(r"^[∗†‡§¶]|^\d+[^\W\d_]", text)
+    if re.match(r"^\d+(?:st|nd|rd|th)\b", text):
+        marked = False
+    sizes = Counter()
+    for span in spans:
+        sizes[round(span["size"])] += len(span["text"])
+    return bool(marked and sizes.most_common(1)[0][0] < body_size)
+
+
+def paper_title(pdf_path):
+    """Join the largest horizontal text, excluding rotated margin stamps."""
+    with pymupdf.open(pdf_path) as doc:
+        spans = [s for b in doc[0].get_text("dict")["blocks"] for line in b.get("lines", [])
+                 if line["dir"] == (1.0, 0.0) for s in line["spans"] if s["text"].strip()]
+    largest = max(s["size"] for s in spans)
+    return " ".join(s["text"].strip() for s in spans if abs(s["size"] - largest) < 0.1)
 
 
 # Known boilerplate, matched as whole passages. Each entry was seen in a real
@@ -44,8 +83,10 @@ def clean(pages):
     """Same shape in and out, so Step 2 does not care whether this ran."""
     # Every word the paper uses, so hyphen fixes can check how the paper
     # itself spells a word elsewhere.
-    vocab = {w.lower() for p in pages for w in WORD.findall(p["text"])}
-    return [{"page": p["page"], "text": clean_page(p["page"], p["text"], vocab)} for p in pages]
+    vocab = {w.lower() for p in pages for w in WORD.findall(p["text"] + "\n" + p.get("footnotes", ""))}
+    return [{"page": p["page"], "text": clean_page(p["page"], p["text"], vocab),
+             "footnotes": clean_page(p["page"], p["footnotes"], vocab) if p.get("footnotes") else ""}
+            for p in pages]
 
 
 def clean_page(page_number, text, vocab):
@@ -213,7 +254,9 @@ def main():
     clean_file = out_dir / f"{path.stem}.clean.txt"
     for target, version in [(out_file, pages), (clean_file, cleaned)]:
         target.write_text(
-            "\n".join(f"=== page {p['page']} ===\n{p['text']}" for p in version),
+            "\n".join(f"=== page {p['page']} ===\n{p['text']}"
+                      + (f"--- footnotes ---\n{p['footnotes']}" if p["footnotes"] else "")
+                      for p in version),
             encoding="utf-8",
         )
 

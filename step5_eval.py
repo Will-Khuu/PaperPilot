@@ -11,6 +11,7 @@ on the right page may still not contain the answer. A phrase hit means the
 chunk's text contains the answer phrase; stricter, it proves the answer was
 actually in front of the model.
 """
+import argparse
 import json
 import sys
 import time
@@ -34,11 +35,15 @@ def normalize(text):
 
 
 def page_hit(result, question):
-    """Any gold page inside the chunk's [page, page_end]."""
+    """Any gold page inside an attention chunk's [page, page_end]."""
+    if result.get("paper_id", PAPER.stem) != PAPER.stem:
+        return False
     return any(result["page"] <= p <= result["page_end"] for p in question["pages"])
 
 
 def phrase_hit(result, question):
+    if result.get("paper_id", PAPER.stem) != PAPER.stem:
+        return False
     return normalize(question["phrase"]) in normalize(result["text"])
 
 
@@ -58,7 +63,7 @@ def hits_at(ranks, k):
 def pages_with_phrase(pages, phrase):
     """Page numbers whose normalized text contains the phrase."""
     target = normalize(phrase)
-    return [p["page"] for p in pages if target in normalize(p["text"])]
+    return [p["page"] for p in pages if target in normalize(p["text"] + "\n" + p.get("footnotes", ""))]
 
 
 def bad_labels(questions, pages):
@@ -118,6 +123,9 @@ def selftest():
     one_page = {"page": 5, "page_end": 5, "text": "3.2 Attention\nfoo bar"}
     two_page = {"page": 5, "page_end": 6, "text": "3.2 Attention\nfoo bar"}
     q6 = {"pages": [6], "phrase": "x"}
+    foreign = {**one_page, "paper_id": "bert"}
+    for hit in HIT_TESTS.values():
+        assert not hit(foreign, {"pages": [5], "phrase": "foo bar"}), "gold labels belong to attention"
     assert not page_hit(one_page, q6), "one-page chunk on p5 misses gold p6"
     assert page_hit(two_page, q6), "chunk spanning p5-6 hits gold p6"
     assert page_hit(one_page, {"pages": [1, 5], "phrase": "x"}), "any of several gold pages counts"
@@ -138,6 +146,7 @@ def selftest():
 
     pages = [{"page": 1, "text": "a\nb c"}, {"page": 2, "text": "b c d"}]
     assert pages_with_phrase(pages, "b c") == [1, 2], "phrase found across a line break"
+    assert pages_with_phrase([{"page": 1, "text": "body", "footnotes": "a\nb"}], "a b") == [1]
     assert bad_labels([{"id": "x", "pages": [1, 2], "phrase": "b c"}], pages) == [], "exact pages pass"
     assert bad_labels([{"id": "x", "pages": [2], "phrase": "b c"}], pages) == [("x", [2], [1, 2])], \
         "a phrase also on an unlabeled page is bad"
@@ -165,20 +174,20 @@ def checked_questions():
     return questions
 
 
-def score_questions(questions, collection=None):
+def score_questions(questions, collection=None, paper_ids=None):
     """One row per question: its first page-hit and phrase-hit rank in the top K.
     `collection` defaults to the real index; Step 6 passes throwaway ones."""
     from step3_embed import retrieve
 
     rows = []
     for q in questions:
-        results = retrieve(q["question"], k=K, collection=collection)
+        results = retrieve(q["question"], k=K, collection=collection, paper_ids=paper_ids)
         rows.append({"id": q["id"], "type": q["type"], "question": q["question"],
                      "ranks": {test: first_hit_rank(results, q, hit) for test, hit in HIT_TESTS.items()}})
     return rows
 
 
-def run(label):
+def run(label, paper_ids=None):
     from step3_embed import EMPTY_INDEX, get_collection
 
     collection = get_collection()
@@ -190,13 +199,13 @@ def run(label):
                  "re-ingest with: python step3_embed.py ingest papers/attention.pdf")
 
     questions = checked_questions()
-    rows = score_questions(questions, collection)
+    rows = score_questions(questions, collection, paper_ids)
     summary = summarize(rows)
     print(format_table(rows))
     print()
     print(format_summary(summary))
 
-    settings = {"k": K, "chunks": collection.count(),
+    settings = {"paper_ids": paper_ids, "k": K, "chunks": collection.count(),
                 "chunk_size": built_with["chunk_size"], "chunk_overlap": built_with["chunk_overlap"]}
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     out_file = OUT_DIR / f"{label or time.strftime('%Y%m%d-%H%M%S')}.json"
@@ -211,7 +220,11 @@ def main():
         sys.exit(__doc__)
     command = sys.argv[1]
     if command == "run":
-        run(sys.argv[sys.argv.index("--label") + 1] if "--label" in sys.argv else None)
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--label")
+        parser.add_argument("--paper", action="append")
+        args = parser.parse_args(sys.argv[2:])
+        run(args.label, args.paper)
     elif command == "selftest":
         selftest()
         print("selftest ok")

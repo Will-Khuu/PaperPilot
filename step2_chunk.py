@@ -15,7 +15,7 @@ from pathlib import Path
 from chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 import ONNXMiniLM_L6_V2
 from tokenizers import Tokenizer
 
-from step1_parse import HEADING_NUMBER, clean, parse
+from step1_parse import HEADING_NUMBER, clean, paper_title, parse
 
 # Numbered headings after Step 1's cleaning: "3.2.1 Scaled Dot-Product Attention".
 NUMBERED_HEADING = re.compile(HEADING_NUMBER.pattern[:-1] + r" [A-Z][A-Za-z&\- ]*$")
@@ -57,41 +57,59 @@ def is_heading(line, first_on_page, after_references):
     return after_references and first_on_page and line.istitle() and not line.endswith(".")
 
 
-def is_footnote_start(line):
-    """Footnotes marked with a symbol: "∗Equal contribution", "†Work performed..."."""
-    return line[:1] in "∗†‡" and line[1:2].isalpha()
+def follows_section(number, last):
+    """Reject table scores and backward headings without requiring every subsection."""
+    if last is None:
+        return number[0] == 1
+    return number > last and number[0] <= last[0] + 1
+
+
+def selftest():
+    for number in [(4, 2), (5,), (4, 1, 1)]:
+        assert follows_section(number, (4, 1))
+    for number in [(71, 0), (50, 6), (3, 2), (6,), (4, 1)]:
+        assert not follows_section(number, (4, 1))
+    assert follows_section((1,), None)
+    assert not follows_section((2,), None)
+    assert follows_section((2, 4), (2, 1))
+    sections = split_sections([
+        {"page": 1, "text": "1 Intro\nbody\n71.0 Table\nvalue", "footnotes": "note one"},
+        {"page": 2, "text": "continued\n2 Methods\nmethod", "footnotes": "note two"},
+    ])
+    assert [s["section"] for s in sections] == ["1 Intro", "Footnotes (p. 1)", "2 Methods", "Footnotes (p. 2)"]
+    assert ("71.0", 1) in sections[0]["words"]
+    assert ("continued", 2) in sections[0]["words"]
+    assert sections[1]["words"] == [("note", 1), ("one", 1)]
+    assert sections[3]["words"] == [("note", 2), ("two", 2)]
 
 
 def split_sections(pages):
-    """Group the paper's words into sections.
+    """Group words into sections, retaining each word's page number.
 
-    Returns [{"section": str, "words": [(word, page), ...]}]. Every word keeps
-    its page number, so a chunk knows exactly which pages it came from.
-    Text before the first heading (title, authors) becomes "Front matter".
-
-    Footnotes sit at the bottom of a page, after whatever section was
-    running, so they'd be glued onto it (page 1's author credits onto the
-    Abstract). From a footnote mark to the end of that page goes into a
-    "Footnotes" section instead, and the next page picks the running
-    section back up.
+    Footnotes have their own section per page, so their chunks cannot claim
+    intervening pages. The body resumes its running section on the next page.
     """
-    sections = {"Front matter": []}  # section name -> words, in reading order
+    sections = {"Front matter": []}
     current = "Front matter"
     after_references = False
+    last_number = None
     for p in pages:
         lines = [line for line in p["text"].splitlines() if line.strip()]
-        in_footnotes = False
         for i, line in enumerate(lines):
-            if not in_footnotes and is_footnote_start(line):
-                in_footnotes = True
-            if in_footnotes:
-                sections.setdefault("Footnotes", []).extend((w, p["page"]) for w in line.split())
-            elif is_heading(line, i == 0, after_references):
+            heading = is_heading(line, i == 0, after_references)
+            if heading and NUMBERED_HEADING.match(line.strip()):
+                number = tuple(int(n) for n in line.split()[0].split("."))
+                heading = follows_section(number, last_number)
+                if heading:
+                    last_number = number
+            if heading:
                 current = line.strip()
                 sections.setdefault(current, [])
                 after_references = after_references or current.lower() == "references"
             else:
                 sections[current].extend((w, p["page"]) for w in line.split())
+        if p.get("footnotes", "").strip():
+            sections[f"Footnotes (p. {p['page']})"] = [(w, p["page"]) for w in p["footnotes"].split()]
     return [{"section": name, "words": words} for name, words in sections.items() if words]
 
 
@@ -155,14 +173,16 @@ def chunk(pages, paper_id, title, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
 def main():
     if len(sys.argv) < 2:
         sys.exit(__doc__)
+    if sys.argv[1] == "selftest":
+        selftest()
+        print("selftest ok")
+        return
     path = Path(sys.argv[1])
     size = int(sys.argv[sys.argv.index("--size") + 1]) if "--size" in sys.argv else CHUNK_SIZE
     overlap = int(sys.argv[sys.argv.index("--overlap") + 1]) if "--overlap" in sys.argv else CHUNK_OVERLAP
 
     pages = clean(parse(path))
-    # The PDF's title metadata is often empty (it is for this paper), so use
-    # the first line of page 1, which Step 1's cleaning made the title.
-    title = pages[0]["text"].splitlines()[0].strip()
+    title = paper_title(path)
     chunks = chunk(pages, paper_id=path.stem, title=title, size=size, overlap=overlap)
 
     out_file = Path("out") / f"{path.stem}.chunks.jsonl"

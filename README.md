@@ -3,7 +3,7 @@
 Ask questions about a research paper and get answers that cite the exact section and page.
 
 PaperPilot is a retrieval-augmented generation (RAG) pipeline built one stage at a time, so each stage can be inspected,
-measured and swapped on its own. It currently works on *Attention Is All You Need* (Vaswani et al., 2017).
+measured and swapped on its own. It supports several papers, with filters, PDF uploads and a compare mode.
 
 ```
 $ python step4_answer.py ask "How many attention heads does the Transformer use?"
@@ -31,6 +31,7 @@ SOURCES
 | 5. Evaluate | `step5_eval.py` | Scores retrieval on 20 labeled questions: hit rate at 1, 5 and 10, by page and by answer phrase, per question type. |
 | 6. Tune | `step6_sweep.py` | Re-scores 12 chunk size and overlap settings in throwaway indexes and applies a decision rule fixed before the run. |
 | 7. Serve | `step7_api.py`, `step7_ui.py` | FastAPI server (/health, /search, /ask) and a Streamlit chat page that shows answers with their sources and the retrieved excerpts. |
+| 8. Several papers | `step3_embed.py`, `step7_api.py`, `step7_ui.py` | Filter retrieval by paper, compare 2-4 papers, and upload PDFs into the shared index. |
 
 ## Design decisions
 
@@ -86,7 +87,7 @@ curl -L -o papers/attention.pdf https://arxiv.org/pdf/1706.03762v7
 
 python step1_parse.py papers/attention.pdf           # parsed and cleaned text in out/
 python step2_chunk.py papers/attention.pdf           # chunks in out/attention.chunks.jsonl
-python step3_embed.py ingest papers/attention.pdf    # build the Chroma index
+python step3_embed.py ingest papers/*.pdf           # index every PDF
 python step3_embed.py ask "What is scaled dot-product attention?"
 
 export ANTHROPIC_API_KEY=...                         # or load it from your OS keychain
@@ -118,7 +119,7 @@ The chat page uses `PAPERPILOT_API` if set, otherwise `http://127.0.0.1:8000`.
 - [x] Evaluation set of 20 questions with known answer pages; hit rate at 1, 5 and 10
 - [x] Tune chunk size and overlap against that baseline (marginal gain; chunking is not the bottleneck)
 - [x] FastAPI backend and Streamlit chat UI
-- [ ] Multiple papers and a compare mode
+- [x] Multiple papers and a compare mode
 
 ## License
 

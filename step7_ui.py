@@ -24,7 +24,7 @@ def request(method, path, **kwargs):
 
 def show_excerpts(excerpts):
     for excerpt in excerpts:
-        st.write(f"[{excerpt['n']}] {excerpt['section']} · {excerpt['pages']} · distance {excerpt['distance']:.3f}")
+        st.write(f"[{excerpt['n']}] {excerpt['title']} · {excerpt['section']} · {excerpt['pages']} · distance {excerpt['distance']:.3f}")
         st.text(excerpt["text"])
 
 
@@ -34,8 +34,11 @@ def show_result(result):
         return
     st.write(result["answer"])
     st.write("Sources")
-    for source in result["sources"]:
-        st.text(f"[{source['n']}] {source['label']}")
+    for pid in dict.fromkeys(source["paper_id"] for source in result["sources"]):
+        sources = [source for source in result["sources"] if source["paper_id"] == pid]
+        st.write(sources[0]["title"])
+        for source in sources:
+            st.text(f"[{source['n']}] {source['label']}")
     if result["invalid"]:
         numbers = ", ".join(f"[{n}]" for n in result["invalid"])
         st.warning(f"These citation numbers do not refer to retrieved excerpts: {numbers}.")
@@ -52,8 +55,28 @@ def show_result(result):
 def main():
     st.title("PaperPilot")
     with st.sidebar:
-        search_only = st.toggle("Search only (free, no LLM)")
-        k = st.slider("Excerpts", 1, 10, 5)
+        mode = st.radio("Mode", ["Ask", "Search only (free)", "Compare"])
+        indexed, error = request("GET", "/papers")
+        if error:
+            st.warning(error)
+        titles = {p["paper_id"]: p["title"] for p in indexed or []}
+        paper_ids = st.multiselect("Papers", list(titles), format_func=lambda pid: titles[pid],
+                                   help="Compare: choose 2-4 papers. Ask/Search: leave empty for all papers.")
+        if mode == "Compare":
+            k = st.slider("Excerpts per paper", 1, 5, 3)
+        else:
+            k = st.slider("Excerpts", 1, 10, 5)
+        uploaded = st.file_uploader("Upload a PDF", type=["pdf"])
+        if st.button("Add paper", disabled=uploaded is None):
+            record, error = request("POST", "/papers",
+                                    files={"file": (uploaded.name, uploaded.getvalue(), "application/pdf")})
+            if error:
+                st.error(error)
+            else:
+                st.session_state.upload_notice = f"Added {record['title']} ({record['chunks']} chunks)."
+                st.rerun()
+        if "upload_notice" in st.session_state:
+            st.success(st.session_state.pop("upload_notice"))
         health, error = request("GET", "/health")
         if error:
             st.warning(error)
@@ -70,15 +93,20 @@ def main():
                 st.error(message["error"])
             else:
                 st.write(message["text"])
-    question = st.chat_input("Ask about the paper")
+    valid_selection = mode != "Compare" or 2 <= len(paper_ids) <= 4
+    if not valid_selection:
+        st.info("Choose 2-4 papers to compare.")
+    question = st.chat_input("Ask about the papers", disabled=not valid_selection)
     if question:
         st.session_state.messages.append({"role": "user", "text": question})
         with st.chat_message("user"):
             st.write(question)
         with st.chat_message("assistant"):
-            with st.spinner("Searching…" if search_only else "Answering…"):
-                result, error = request("POST", "/search" if search_only else "/ask",
-                                        json={"question": question, "k": k})
+            endpoint = {"Ask": "/ask", "Search only (free)": "/search", "Compare": "/compare"}[mode]
+            payload = {"question": question, "paper_ids": paper_ids or None}
+            payload["k_per_paper" if mode == "Compare" else "k"] = k
+            with st.spinner("Searching…" if mode == "Search only (free)" else "Answering…"):
+                result, error = request("POST", endpoint, json=payload)
             if error:
                 st.error(error)
                 st.session_state.messages.append({"role": "assistant", "error": error})

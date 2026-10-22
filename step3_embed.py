@@ -11,13 +11,14 @@ Retrieval is tested on its own here, before any LLM is attached, so a bad
 answer later can be traced to either "found the wrong chunks" or "used the
 right chunks badly", never a mix of both.
 """
+import argparse
 import sys
 from pathlib import Path
 
 import chromadb
 from chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 import ONNXMiniLM_L6_V2
 
-from step1_parse import clean, parse
+from step1_parse import clean, paper_title, parse
 from step2_chunk import CHUNK_OVERLAP, CHUNK_SIZE, chunk
 
 DB_PATH = str(Path(__file__).parent / "chroma_db")
@@ -60,7 +61,7 @@ CHUNK_FIELDS = ("paper_id", "title", "section", "page", "page_end", "chunk_index
 def paper_chunks(pdf_path, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
     path = Path(pdf_path)
     pages = clean(parse(path))
-    title = pages[0]["text"].splitlines()[0].strip()
+    title = paper_title(path)
     return chunk(pages, paper_id=path.stem, title=title, size=size, overlap=overlap)
 
 
@@ -91,6 +92,18 @@ def ingest(pdf_path, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
     add_chunks(collection, chunks)
     collection.modify(metadata={"chunk_size": size, "chunk_overlap": overlap})
     return len(chunks)
+
+
+def list_papers(collection=None):
+    """Derive the paper list from chunk metadata, including References."""
+    collection = get_collection() if collection is None else collection
+    papers = {}
+    for meta in collection.get(include=["metadatas"])["metadatas"]:
+        pid = meta["paper_id"]
+        if pid not in papers:
+            papers[pid] = {"paper_id": pid, "title": meta["title"], "chunks": 0}
+        papers[pid]["chunks"] += 1
+    return [papers[pid] for pid in sorted(papers)]
 
 
 def retrieve(question, k=5, paper_ids=None, include_references=False, collection=None):
@@ -136,11 +149,16 @@ def main():
     command = sys.argv[1]
 
     if command == "ingest":
-        size = int(sys.argv[sys.argv.index("--size") + 1]) if "--size" in sys.argv else CHUNK_SIZE
-        overlap = int(sys.argv[sys.argv.index("--overlap") + 1]) if "--overlap" in sys.argv else CHUNK_OVERLAP
-        n = ingest(sys.argv[2], size=size, overlap=overlap)
+        parser = argparse.ArgumentParser()
+        parser.add_argument("pdfs", nargs="+")
+        parser.add_argument("--size", type=int, default=CHUNK_SIZE)
+        parser.add_argument("--overlap", type=int, default=CHUNK_OVERLAP)
+        args = parser.parse_args(sys.argv[2:])
+        for pdf in args.pdfs:
+            n = ingest(pdf, size=args.size, overlap=args.overlap)
+            print(f"ingested {n} chunks from {pdf}")
         collection = get_collection()
-        print(f"ingested {n} chunks from {sys.argv[2]}; collection now holds {collection.count()}")
+        print(f"collection now holds {collection.count()}")
         print(f"distance: {collection.configuration['hnsw']['space']}; chunk settings: {collection.metadata}")
     elif command == "ask":
         k = int(sys.argv[sys.argv.index("--k") + 1]) if "--k" in sys.argv else 5

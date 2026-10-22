@@ -1,6 +1,8 @@
 [server]
 # Keep the chat page accessible only from this machine.
 address = "127.0.0.1"
+# Match the server's 20 MB PDF limit, so the upload box doesn't promise 200 MB.
+maxUploadSize = 20
 
 [browser]
 # Keep local usage from being sent to Streamlit.
