@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, UploadFile, File
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator
 
 from step3_embed import EMPTY_INDEX, get_collection, ingest, list_papers, retrieve
@@ -19,11 +19,20 @@ from step4_answer import COMPARE_PROMPT, SUMMARY_PROMPT, SYSTEM_PROMPT, MODEL, a
 from step9_summary import summarize
 import step10_notes as notes
 import step11_cache as cache
+import deploy
 from step11_cache import index_fingerprint
 
 app = FastAPI()
 PAPERS_DIR = Path(__file__).parent / "papers"
 MAX_UPLOAD = 20 * 1024 * 1024
+
+
+@app.middleware("http")
+async def block_demo_uploads(request, call_next):
+    # Reject before FastAPI's multipart parser reads the upload body.
+    if deploy.DEPLOYED and request.method == "POST" and request.url.path.rstrip("/") == "/papers":
+        return JSONResponse(status_code=403, content={"detail": "Uploads are disabled on the demo."})
+    return await call_next(request)
 
 
 class Question(BaseModel):
@@ -140,6 +149,15 @@ class AnswerResult(SearchResult):
 
 
 def get_answerer():
+    if deploy.DEPLOYED:
+        def demo_answerer(prompt, system=None):
+            if not deploy.take_llm_call():
+                raise HTTPException(status_code=429, detail=(
+                    f"Daily demo limit of {deploy.DAILY_LLM_LIMIT} answers reached. "
+                    "Search only, cached answers and notes still work."))
+            return ask_claude(prompt, system=system) if system else ask_claude(prompt)
+
+        return demo_answerer
     return ask_claude
 
 
@@ -332,7 +350,8 @@ def selftest():
     previous = app.dependency_overrides.copy()
     app.dependency_overrides[get_answerer] = lambda: fake_answerer
     try:
-        with TemporaryDirectory() as directory, patch.object(notes, "DB_PATH", Path(directory) / "notes.db"), TestClient(app) as client:
+        with TemporaryDirectory() as directory, patch.object(notes, "DB_PATH", Path(directory) / "notes.db"), \
+             patch.object(deploy, "DEPLOYED", False), TestClient(app) as client:
             response = client.get("/health")
             assert response.status_code == 200, "health reads the real index"
             assert response.json() == {"chunks": get_collection().count(), **get_collection().metadata}, \
@@ -506,9 +525,59 @@ def selftest():
                     response = client.post(endpoint, json=payload)
                     assert response.status_code == 503 and response.json() == {"detail": EMPTY_INDEX}, \
                         "empty index becomes 503 without changing the real index"
+            test_deployed(client, payload, ids, pid, fake_answerer)
     finally:
         app.dependency_overrides.clear()
         app.dependency_overrides.update(previous)
+
+
+def test_deployed(client, payload, ids, pid, fake_answerer):
+    from concurrent.futures import ThreadPoolExecutor
+    from tempfile import TemporaryDirectory
+    from unittest.mock import patch
+
+    with TemporaryDirectory() as directory:
+        path = Path(directory) / "budget.db"
+        take_call = deploy.take_llm_call
+        with patch.object(deploy, "DEPLOYED", True), patch.object(deploy, "DAILY_LLM_LIMIT", 2), \
+             patch.object(deploy, "take_llm_call", side_effect=lambda: take_call(path=path)), \
+             patch(__name__ + ".ask_claude", side_effect=fake_answerer) as paid:
+            app.dependency_overrides.pop(get_answerer, None)
+            assert client.post("/papers", content=b"not even multipart").status_code == 403
+            response = client.post("/papers", files={"file": ("demo.pdf", b"%PDF", "application/pdf")})
+            assert response.json() == {"detail": "Uploads are disabled on the demo."}
+            for endpoint, body in (("/ask", payload), ("/compare", {"question": payload["question"], "paper_ids": ids}),
+                                   ("/summarize", {"paper_id": pid})):
+                cache.clear(path=notes.DB_PATH)
+                path.unlink(missing_ok=True)
+                assert deploy.llm_calls_today(path=path) == 0
+                first = client.post(endpoint, json=body)
+                assert first.status_code == 200 and not first.json()["cached"]
+                assert deploy.llm_calls_today(path=path) == 1
+                before = paid.call_count
+                assert client.post(endpoint, json=body).json()["cached"]
+                assert paid.call_count == before and deploy.llm_calls_today(path=path) == 1
+                cache.clear(path=notes.DB_PATH)
+                assert client.post(endpoint, json=body).status_code == 200
+                assert deploy.llm_calls_today(path=path) == 2
+                assert client.post(endpoint, json=body).json()["cached"], "cached answers work at the limit"
+                cache.clear(path=notes.DB_PATH)
+                before = paid.call_count
+                response = client.post(endpoint, json=body)
+                assert response.status_code == 429 and response.json() == {"detail": (
+                    "Daily demo limit of 2 answers reached. Search only, cached answers and notes still work.")}
+                assert paid.call_count == before and deploy.llm_calls_today(path=path) == 2
+            assert client.post("/search", json=payload).status_code == 200
+            assert client.get("/health").status_code == 200
+            assert client.get("/papers").status_code == 200
+            note = client.post("/notes", json={"paper_id": pid, "text": "Still available"}).json()
+            assert client.get("/notes").status_code == 200
+            assert client.delete(f"/notes/{note['id']}").status_code == 204
+            assert deploy.llm_calls_today(path=path) == 2
+            path.unlink()
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                accepted = list(pool.map(lambda _: take_call(path=path), range(16)))
+            assert sum(accepted) == 2 and deploy.llm_calls_today(path=path) == 2
 
 
 def test_uploads(client, indexed):

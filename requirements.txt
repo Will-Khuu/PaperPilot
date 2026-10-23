@@ -1,4 +1,4 @@
-# Versions used for the published results (Python 3.9).
+# Versions verified on Python 3.12.
 PyMuPDF==1.26.5
 chromadb==1.5.9
 anthropic==0.125.0

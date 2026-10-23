@@ -1,16 +1,53 @@
-"""Step 7: an HTTP chat client. Run with streamlit run step7_ui.py."""
+"""Step 7: the chat page. Run with streamlit run step7_ui.py."""
 from datetime import datetime
+import hmac
 import os
+import sys
 
 import httpx
 import streamlit as st
 
+import deploy
+
 API = os.environ.get("PAPERPILOT_API", "http://127.0.0.1:8000").rstrip("/")
+
+
+@st.cache_resource
+def api_client():
+    from fastapi.testclient import TestClient
+    from step7_api import app
+
+    return TestClient(app, raise_server_exceptions=False)
+
+
+@st.cache_resource
+def build_index():
+    return deploy.ensure_index()
+
+
+def password_gate():
+    password = os.environ.get("APP_PASSWORD", "")
+    if not password:
+        st.error("This demo is not configured.")
+        st.stop()
+    if st.session_state.get("authenticated"):
+        return
+    with st.form("login"):
+        entered = st.text_input("Password", type="password")
+        if st.form_submit_button("Sign in"):
+            if hmac.compare_digest(entered.encode("utf-8"), password.encode("utf-8")):
+                st.session_state.authenticated = True
+                st.rerun()
+            st.error("Incorrect password.")
+    st.stop()
 
 
 def request(method, path, **kwargs):
     try:
-        response = httpx.request(method, API + path, timeout=180, **kwargs)
+        if deploy.DEPLOYED:
+            response = api_client().request(method, path, **kwargs)
+        else:
+            response = httpx.request(method, API + path, timeout=180, **kwargs)
         response.raise_for_status()
         if response.status_code == 204:
             return None, None
@@ -24,6 +61,8 @@ def request(method, path, **kwargs):
             detail = f"Server returned HTTP {e.response.status_code}."
         return None, str(detail)
     except httpx.RequestError:
+        if deploy.DEPLOYED:
+            return None, "The demo could not complete the request."
         return None, f"Cannot reach the server at {API}. Start it with python step7_api.py serve."
 
 
@@ -77,6 +116,8 @@ def save_to_notes(result, paper_ids, key):
 
 
 def show_notes(paper_id):
+    if deploy.DEPLOYED:
+        st.caption("Demo notes are temporary: they are deleted when the app restarts.")
     if not paper_id:
         st.info("Choose a paper to see its notes.")
         return
@@ -121,8 +162,20 @@ def show_notes(paper_id):
 
 
 def main():
+    if deploy.DEPLOYED:
+        password_gate()
+        with st.spinner("Building the index (first visit after a restart takes about a minute)…"):
+            try:
+                build_index()
+            except Exception as exc:
+                print(f"Could not build the paper index: {exc}", file=sys.stderr)
+                st.error("Could not build the paper index. Try again in a few minutes.")
+                st.stop()
     st.title("PaperPilot")
     with st.sidebar:
+        if deploy.DEPLOYED:
+            remaining = max(0, deploy.DAILY_LLM_LIMIT - deploy.llm_calls_today())
+            st.caption(f"Paid answers left today: {remaining} of {deploy.DAILY_LLM_LIMIT}")
         mode = st.radio("Mode", ["Ask", "Search only (free)", "Compare", "Summarize", "Notes"])
         indexed, error = request("GET", "/papers")
         if error:
@@ -137,15 +190,16 @@ def main():
                 k = st.slider("Excerpts per paper", 1, 5, 3)
             else:
                 k = st.slider("Excerpts", 1, 10, 5)
-        uploaded = st.file_uploader("Upload a PDF", type=["pdf"])
-        if st.button("Add paper", disabled=uploaded is None):
-            record, error = request("POST", "/papers",
-                                    files={"file": (uploaded.name, uploaded.getvalue(), "application/pdf")})
-            if error:
-                st.error(error)
-            else:
-                st.session_state.upload_notice = f"Added {record['title']} ({record['chunks']} chunks)."
-                st.rerun()
+        if not deploy.DEPLOYED:
+            uploaded = st.file_uploader("Upload a PDF", type=["pdf"])
+            if st.button("Add paper", disabled=uploaded is None):
+                record, error = request("POST", "/papers",
+                                        files={"file": (uploaded.name, uploaded.getvalue(), "application/pdf")})
+                if error:
+                    st.error(error)
+                else:
+                    st.session_state.upload_notice = f"Added {record['title']} ({record['chunks']} chunks)."
+                    st.rerun()
         if "upload_notice" in st.session_state:
             st.success(st.session_state.pop("upload_notice"))
         health, error = request("GET", "/health")

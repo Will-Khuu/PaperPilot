@@ -78,7 +78,7 @@ SOURCES
 
 ## Run it
 
-Requires Python 3.9+ and an Anthropic API key for stage 4.
+Requires Python 3.12 and an Anthropic API key for stage 4.
 
 ```bash
 python3 -m venv .venv
@@ -114,6 +114,25 @@ streamlit run step7_ui.py
 Both servers run on this machine only (127.0.0.1). Search only needs no API key.
 The chat page's address comes from `.streamlit/config.toml`.
 The chat page uses `PAPERPILOT_API` if set, otherwise `http://127.0.0.1:8000`.
+
+## Deploy (Streamlit Community Cloud)
+
+Choose `step7_ui.py` as the main file and Python 3.12 in Advanced settings. Add these secrets as root-level
+TOML strings, with quotes so Community Cloud exposes them as environment variables:
+
+```toml
+PAPERPILOT_DEPLOYED = "1"
+APP_PASSWORD = "..."
+ANTHROPIC_API_KEY = "..."
+```
+
+The page requires the password before building the index or calling the API. The API runs inside the page process,
+so there is no separate server to start. A cold start downloads and indexes the four pinned arXiv papers.
+Uploads are disabled on the demo.
+
+The demo allows 40 paid answers per UTC day, shared by all visitors. Cached answers, Search only and notes stay
+available after the limit. Notes, the answer cache and the budget counter reset when the app restarts.
+Set a spending cap on the demo's Anthropic key as a backstop for those resets.
 
 ## Roadmap
 
