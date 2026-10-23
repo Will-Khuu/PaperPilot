@@ -101,8 +101,9 @@ def list_papers(collection=None):
     for meta in collection.get(include=["metadatas"])["metadatas"]:
         pid = meta["paper_id"]
         if pid not in papers:
-            papers[pid] = {"paper_id": pid, "title": meta["title"], "chunks": 0}
+            papers[pid] = {"paper_id": pid, "title": meta["title"], "chunks": 0, "pages": 0}
         papers[pid]["chunks"] += 1
+        papers[pid]["pages"] = max(papers[pid]["pages"], meta["page_end"])
     return [papers[pid] for pid in sorted(papers)]
 
 

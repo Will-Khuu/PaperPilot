@@ -7,3 +7,10 @@ maxUploadSize = 20
 [browser]
 # Keep local usage from being sent to Streamlit.
 gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#3B5BDB"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F7F8FC"
+textColor = "#1F2333"

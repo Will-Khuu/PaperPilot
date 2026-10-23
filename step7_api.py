@@ -62,6 +62,7 @@ class Paper(BaseModel):
     paper_id: str
     title: str
     chunks: int
+    pages: int
 
 
 class Health(BaseModel):
@@ -593,7 +594,7 @@ def test_uploads(client, indexed):
             assert path.parent == save_dir
             with fitz.open(path) as pdf:
                 assert pdf.page_count == 1
-            records.append({"paper_id": path.stem, "title": "Uploaded paper", "chunks": 1})
+            records.append({"paper_id": path.stem, "title": "Uploaded paper", "chunks": 1, "pages": 1})
 
         with patch(__name__ + ".PAPERS_DIR", save_dir), \
              patch(__name__ + ".list_papers", side_effect=lambda: records), \
