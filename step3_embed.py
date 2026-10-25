@@ -5,6 +5,7 @@ Usage:
     python step3_embed.py ingest papers/attention.pdf --size 160 --overlap 80
     python step3_embed.py ask "how many attention heads?"  # top 5 with distances
     python step3_embed.py ask "..." --k 10 --with-references
+    python step3_embed.py ask "..." --method hybrid        # try BM25 + vector ranking
     python step3_embed.py demo                             # the eight test questions
 
 Retrieval is tested on its own here, before any LLM is attached, so a bad
@@ -20,10 +21,16 @@ from chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 import ONNXMiniLM_L6_
 
 from step1_parse import clean, paper_title, parse
 from step2_chunk import CHUNK_OVERLAP, CHUNK_SIZE, chunk
+from step12_hybrid import B, K1, RRF_K, bm25_scores, fuse
 
 DB_PATH = str(Path(__file__).parent / "chroma_db")
 EMPTY_INDEX = "the index is empty; run `python step3_embed.py ingest papers/attention.pdf` first"
 COLLECTION = "papers"
+# Hybrid failed the Step 12 adoption rule (see out/eval/hybrid-*.json); switch to "hybrid" to try it.
+DEFAULT_METHOD = "vector"
+# Part of the answer cache key, so changing the method or any BM25/RRF constant
+# invalidates cached answers automatically.
+RETRIEVAL = "vector" if DEFAULT_METHOD == "vector" else f"hybrid-rrf{RRF_K}-k1{K1}-b{B}"
 
 TEST_QUESTIONS = [
     "How many attention heads does the Transformer use?",            # exact fact
@@ -107,16 +114,20 @@ def list_papers(collection=None):
     return [papers[pid] for pid in sorted(papers)]
 
 
-def retrieve(question, k=5, paper_ids=None, include_references=False, collection=None):
-    """Return the k chunks closest to the question, closest first.
+def retrieve(question, k=5, paper_ids=None, include_references=False, collection=None, method=DEFAULT_METHOD):
+    """Return the top k chunks using vectors by default, or BM25 + vectors.
 
     Each result: {"id", "text", "distance", and the chunk's metadata}.
+    Hybrid adds vector_rank, keyword_rank and rrf_score; distance stays cosine,
+    or None for candidates missing from the vector query.
     References are left out by default: their titles share words with real
     questions ("attention", "translation") and would take top-k slots from
     chunks that actually answer.
 
     `collection` defaults to the real index; Step 6 passes throwaway ones.
     """
+    if method not in ("hybrid", "vector"):
+        raise ValueError(f"unknown retrieval method: {method}")
     conditions = []
     if paper_ids:
         conditions.append({"paper_id": {"$in": list(paper_ids)}})
@@ -127,6 +138,26 @@ def retrieve(question, k=5, paper_ids=None, include_references=False, collection
     collection = get_collection() if collection is None else collection
     if collection.count() == 0:
         raise RuntimeError(EMPTY_INDEX)
+    if method == "vector":
+        return vector_search(question, k, where, collection)
+    candidates = collection.get(where=where, include=["documents", "metadatas"])
+    if not candidates["ids"]:
+        return []
+    # Query every filtered candidate so both rankings cover the same chunks.
+    vector = vector_search(question, len(candidates["ids"]), where, collection)
+    keyword_scores = dict(zip(candidates["ids"], bm25_scores(question, candidates["documents"])))
+    by_id = {hit["id"]: hit for hit in vector}
+    # Filtered HNSW search can omit candidates; preserve their text and metadata.
+    for id_, text, meta in zip(candidates["ids"], candidates["documents"], candidates["metadatas"]):
+        if id_ not in by_id:
+            by_id[id_] = {"id": id_, "text": text, **meta, "distance": None}
+    ranked = fuse([hit["id"] for hit in vector], keyword_scores)
+    return [{**by_id[id_], "vector_rank": vr, "keyword_rank": kr, "rrf_score": score}
+            for id_, score, vr, kr in ranked[:k]]
+
+
+def vector_search(question, k, where, collection):
+    """Keep the original cosine query available for baseline comparisons."""
     found = collection.query(query_texts=[question], n_results=k, where=where)
     return [
         {"id": id_, "text": text, "distance": dist, **meta}
@@ -140,7 +171,9 @@ def show(question, results):
     for rank, r in enumerate(results, start=1):
         pages = f"p{r['page']}" if r["page"] == r["page_end"] else f"p{r['page']}-{r['page_end']}"
         body = " ".join(r["text"].split("\n", 1)[1].split())
-        print(f"  {rank}. {r['distance']:.3f}  {r['id']}  {pages:<6} {r['section']}")
+        ranks = f"  v={r['vector_rank']} kw={r['keyword_rank']}" if "vector_rank" in r else f"  v={rank}"
+        distance = "-" if r["distance"] is None else f"{r['distance']:.3f}"
+        print(f"  {rank}. {distance}{ranks}  {r['id']}  {pages:<6} {r['section']}")
         print(f"       {body[:100]}...")
 
 
@@ -162,9 +195,14 @@ def main():
         print(f"collection now holds {collection.count()}")
         print(f"distance: {collection.configuration['hnsw']['space']}; chunk settings: {collection.metadata}")
     elif command == "ask":
-        k = int(sys.argv[sys.argv.index("--k") + 1]) if "--k" in sys.argv else 5
-        question = sys.argv[2]
-        show(question, retrieve(question, k=k, include_references="--with-references" in sys.argv))
+        parser = argparse.ArgumentParser()
+        parser.add_argument("question")
+        parser.add_argument("--k", type=int, default=5)
+        parser.add_argument("--with-references", action="store_true")
+        parser.add_argument("--method", choices=("vector", "hybrid"), default=DEFAULT_METHOD)
+        args = parser.parse_args(sys.argv[2:])
+        show(args.question, retrieve(args.question, k=args.k, include_references=args.with_references,
+                                     method=args.method))
     elif command == "demo":
         for question in TEST_QUESTIONS:
             show(question, retrieve(question))

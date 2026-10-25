@@ -3,6 +3,7 @@
 Usage:
     python step5_eval.py run                    # results to out/eval/<timestamp>.json
     python step5_eval.py run --label baseline   # results to out/eval/baseline.json
+    python step5_eval.py run --method hybrid    # try hybrid ranking; default is vector
     python step5_eval.py selftest               # pure functions only: no Chroma, no network
 
 Two hit tests, because each misses something the other catches. A page hit
@@ -174,22 +175,24 @@ def checked_questions():
     return questions
 
 
-def score_questions(questions, collection=None, paper_ids=None):
+def score_questions(questions, collection=None, paper_ids=None, method=None):
     """One row per question: its first page-hit and phrase-hit rank in the top K.
     `collection` defaults to the real index; Step 6 passes throwaway ones."""
-    from step3_embed import retrieve
+    from step3_embed import DEFAULT_METHOD, retrieve
 
+    method = DEFAULT_METHOD if method is None else method
     rows = []
     for q in questions:
-        results = retrieve(q["question"], k=K, collection=collection, paper_ids=paper_ids)
+        results = retrieve(q["question"], k=K, collection=collection, paper_ids=paper_ids, method=method)
         rows.append({"id": q["id"], "type": q["type"], "question": q["question"],
                      "ranks": {test: first_hit_rank(results, q, hit) for test, hit in HIT_TESTS.items()}})
     return rows
 
 
-def run(label, paper_ids=None):
-    from step3_embed import EMPTY_INDEX, get_collection
+def run(label, paper_ids=None, method=None):
+    from step3_embed import DEFAULT_METHOD, EMPTY_INDEX, get_collection
 
+    method = DEFAULT_METHOD if method is None else method
     collection = get_collection()
     if collection.count() == 0:
         raise RuntimeError(EMPTY_INDEX)
@@ -199,13 +202,13 @@ def run(label, paper_ids=None):
                  "re-ingest with: python step3_embed.py ingest papers/attention.pdf")
 
     questions = checked_questions()
-    rows = score_questions(questions, collection, paper_ids)
+    rows = score_questions(questions, collection, paper_ids, method=method)
     summary = summarize(rows)
     print(format_table(rows))
     print()
     print(format_summary(summary))
 
-    settings = {"paper_ids": paper_ids, "k": K, "chunks": collection.count(),
+    settings = {"paper_ids": paper_ids, "method": method, "k": K, "chunks": collection.count(),
                 "chunk_size": built_with["chunk_size"], "chunk_overlap": built_with["chunk_overlap"]}
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     out_file = OUT_DIR / f"{label or time.strftime('%Y%m%d-%H%M%S')}.json"
@@ -223,8 +226,9 @@ def main():
         parser = argparse.ArgumentParser()
         parser.add_argument("--label")
         parser.add_argument("--paper", action="append")
+        parser.add_argument("--method", choices=("vector", "hybrid"), default=None)
         args = parser.parse_args(sys.argv[2:])
-        run(args.label, args.paper)
+        run(args.label, args.paper, method=args.method)
     elif command == "selftest":
         selftest()
         print("selftest ok")

@@ -98,7 +98,7 @@ def run():
             )
             try:
                 add_chunks(collection, chunks)
-                rows = score_questions(questions, collection)
+                rows = score_questions(questions, collection, method="vector")
             finally:
                 client.delete_collection(name)
             results.append({"chunk_size": size, "chunk_overlap": overlap, "chunks": len(chunks),

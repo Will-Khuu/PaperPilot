@@ -199,7 +199,7 @@ def format_report(chunks, answer, model=None):
 
     lines = ["RETRIEVED"]
     for n, chunk in enumerate(chunks, start=1):
-        lines.append(f"  [{n}] {chunk['id']}  d={chunk['distance']:.3f}  {page_label(chunk)}  {chunk['section']}")
+        lines.append(f"  [{n}] {chunk['id']}  d={format(chunk['distance'], '.3f') if chunk['distance'] is not None else '-'}  {page_label(chunk)}  {chunk['section']}")
     lines += ["", "ANSWER", answer, "", "SOURCES"]
     for n in checked["cited"]:
         chunk = source_for(n, chunks)

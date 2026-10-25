@@ -19,7 +19,8 @@ def digest(value):
     return hashlib.sha256(json.dumps(value, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def cache_key(kind, question="", paper_ids=None, *, model, prompt, fingerprint, k=None, k_per_paper=None):
+def cache_key(kind, question="", paper_ids=None, *, model, prompt, fingerprint, k=None, k_per_paper=None,
+              retrieval=None):
     inputs = {
         "kind": kind,
         "question": " ".join(question.split()),
@@ -33,6 +34,8 @@ def cache_key(kind, question="", paper_ids=None, *, model, prompt, fingerprint, 
         inputs["k"] = k
     elif kind == "compare":
         inputs["k_per_paper"] = k_per_paper
+    if kind in ("ask", "compare"):
+        inputs["retrieval"] = retrieval
     return digest(inputs)
 
 
@@ -85,21 +88,25 @@ def selftest():
     import step10_notes as notes
 
     inputs = {"kind": "ask", "question": "How many heads?", "paper_ids": ["bert", "attention"],
-              "k": 5, "model": "model", "prompt": "system prompt", "fingerprint": "index"}
+              "k": 5, "model": "model", "prompt": "system prompt", "fingerprint": "index",
+              "retrieval": "hybrid-rrf60"}
     key = cache_key(**inputs)
     assert len(key) == 64 and key == cache_key(**inputs)
     assert key == cache_key(**{**inputs, "question": "  How  many\nheads?  "})
     assert key == cache_key(**{**inputs, "paper_ids": ["attention", "bert"]})
     for field, value in (("kind", "compare"), ("question", "how many heads?"), ("paper_ids", ["bert"]),
-                         ("k", 3), ("model", "other"), ("prompt", "other"), ("fingerprint", "other")):
+                         ("k", 3), ("model", "other"), ("prompt", "other"), ("fingerprint", "other"),
+                         ("retrieval", "vector")):
         assert key != cache_key(**{**inputs, field: value}), field
     comparison = {**inputs, "kind": "compare", "k_per_paper": 3}
     assert cache_key(**comparison) != cache_key(**{**comparison, "paper_ids": ["attention", "bert"]})
     assert cache_key(**comparison) != cache_key(**{**comparison, "k_per_paper": 4})
+    assert cache_key(**comparison) != cache_key(**{**comparison, "retrieval": "vector"})
     unfiltered = {**inputs, "paper_ids": None}
     assert cache_key(**unfiltered) == cache_key(**{**unfiltered, "paper_ids": []})
     summary = {**inputs, "kind": "summary", "question": "", "paper_ids": ["attention"]}
     assert cache_key(**summary) != cache_key(**{**summary, "paper_ids": ["bert"]})
+    assert cache_key(**summary) == cache_key(**{**summary, "retrieval": "vector"})
 
     collection = Mock()
     collection.metadata = {"chunk_size": 220, "chunk_overlap": 80}

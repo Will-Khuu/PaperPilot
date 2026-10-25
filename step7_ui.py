@@ -167,7 +167,7 @@ def page_style():
 def show_excerpts(excerpts):
     for excerpt in excerpts:
         label = (f"[{excerpt['n']}] {excerpt['title']} · {excerpt['section']} · "
-                 f"{excerpt['pages']} · distance {excerpt['distance']:.3f}")
+                 f"{excerpt['pages']} · distance {format(excerpt['distance'], '.3f') if excerpt['distance'] is not None else '-'}")
         st.markdown(f'<div class="pp-meta">{html_text(label)}</div>'
                     f'<div class="pp-excerpt">{html_text(excerpt["text"])}</div>', unsafe_allow_html=True)
 

@@ -13,7 +13,7 @@ from fastapi import Depends, FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator
 
-from step3_embed import EMPTY_INDEX, get_collection, ingest, list_papers, retrieve
+from step3_embed import EMPTY_INDEX, RETRIEVAL, get_collection, ingest, list_papers, retrieve
 from step4_answer import COMPARE_PROMPT, SUMMARY_PROMPT, SYSTEM_PROMPT, MODEL, ask_claude, build_prompt, check_answer, page_label, source_label
 
 from step9_summary import summarize
@@ -80,7 +80,7 @@ class Excerpt(BaseModel):
     page: int
     page_end: int
     pages: str
-    distance: float
+    distance: Optional[float]  # None when a hybrid candidate had no vector hit
     text: str
 
 
@@ -222,7 +222,8 @@ async def upload_paper(file: UploadFile = File(...)):
 def compare(request: Comparison, answerer=Depends(get_answerer)):
     validate_papers(request.paper_ids)
     key = cache.cache_key("compare", request.question, request.paper_ids, k_per_paper=request.k_per_paper,
-                          model=MODEL, prompt=COMPARE_PROMPT, fingerprint=index_fingerprint(request.paper_ids))
+                          model=MODEL, prompt=COMPARE_PROMPT, fingerprint=index_fingerprint(request.paper_ids),
+                          retrieval=RETRIEVAL)
     stored = cache.get(key, path=notes.DB_PATH)
     if stored is not None:
         return {**stored, "cached": True}
@@ -258,7 +259,8 @@ def search(request: Question, chunks=Depends(get_chunks)):
 def ask(request: Question, answerer=Depends(get_answerer)):
     validate_papers(request.paper_ids)
     key = cache.cache_key("ask", request.question, request.paper_ids, k=request.k,
-                          model=MODEL, prompt=SYSTEM_PROMPT, fingerprint=index_fingerprint(request.paper_ids))
+                          model=MODEL, prompt=SYSTEM_PROMPT, fingerprint=index_fingerprint(request.paper_ids),
+                          retrieval=RETRIEVAL)
     stored = cache.get(key, path=notes.DB_PATH)
     if stored is not None:
         return {**stored, "cached": True}
@@ -335,6 +337,8 @@ def selftest():
     from step4_answer import NOT_COVERED
 
     question = "How many attention heads does the Transformer use?"
+    assert len(retrieve(question, paper_ids=[])) == len(retrieve(question, paper_ids=None)), \
+        "an empty paper filter searches all papers in the real index"
     payload = {"question": question, "k": 3}
     reply = ["Eight heads [2][1][2][99].", "fake-model"]
     prompts = []
@@ -435,6 +439,13 @@ def selftest():
             assert client.post("/ask", json={**payload, "paper_ids": ids}).json()["cached"] is False
             assert client.post("/ask", json={**payload, "paper_ids": ids[::-1]}).json()["cached"] is True
             assert len(prompts) == before + 1, "ask filters are unordered"
+            with patch(__name__ + ".RETRIEVAL", "changed-retrieval"):
+                for endpoint, body in (("/ask", {**payload, "paper_ids": ids}),
+                                       ("/compare", {"question": question, "paper_ids": ids})):
+                    before = len(prompts)
+                    assert client.post(endpoint, json=body).json()["cached"] is False
+                    assert client.post(endpoint, json=body).json()["cached"] is True
+                    assert len(prompts) == before + 1, "retrieval changes invalidate answers"
             for bad_ids in ([pid], [pid] * 5, [pid, pid]):
                 assert client.post("/compare", json={"question": question, "paper_ids": bad_ids}).status_code == 422
             for k in (0, 6):
@@ -459,7 +470,8 @@ def selftest():
             assert prompts[-1] == build_prompt(f"Summarize this paper: {result['title']}", chunks)
             assert result["cached"] is False
             before = len(prompts)
-            with patch(__name__ + ".summarize", side_effect=AssertionError("cache hit summarized")):
+            with patch(__name__ + ".summarize", side_effect=AssertionError("cache hit summarized")), \
+                 patch(__name__ + ".RETRIEVAL", "changed-retrieval"):
                 repeated = client.post("/summarize", json={"paper_id": pid}).json()
                 assert repeated == {**result, "cached": True} and len(prompts) == before
             cache.clear(path=notes.DB_PATH)
