@@ -150,6 +150,7 @@ vite.config.ts.timestamp-*
 
 # PaperPilot: local data and outputs
 .venv/
+.venv-unstructured/
 __pycache__/
 out/
 papers/

@@ -70,6 +70,11 @@ SOURCES
   but the gain is two questions, within noise. The finding is
   that chunking is not the bottleneck: the remaining misses come from paraphrased questions and ranking order, which
   point to a stronger embedding model or adding keyword search.
+- **Parser comparison:** Unstructured (`fast` and `hi_res`) against PyMuPDF on the same 20 questions, with cleaning,
+  chunking and embeddings held fixed (`step13_parsers.py`). Answer at rank 1: PyMuPDF 12, fast 11, hi_res 9 of 20, so
+  PyMuPDF stays. All three kept every answer in their text; Unstructured lost on structure, mixing footnotes into the
+  body and merging a run-in heading with its paragraph. hi_res kept tables as rows and columns, but took 28–41 s per
+  paper against 0.1–0.2 s for PyMuPDF.
 - **Answers:** all 8 answered; all 17 cited claims were checked against the cited text and matched
   (measured on the earlier 220/40 index). For "What is BERT?"
   (not in the paper) the model declined instead of answering from training data.
@@ -145,6 +150,7 @@ Set a spending cap on the demo's Anthropic key as a backstop for those resets.
 - [x] Paper summaries with citations
 - [x] Notes per paper with Markdown export
 - [x] Exact-match caching for answers, comparisons and summaries
+- [x] Compare the Unstructured parser against PyMuPDF (PyMuPDF kept)
 
 ## License
 

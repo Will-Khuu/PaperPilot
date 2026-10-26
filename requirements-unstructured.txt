@@ -1,0 +1,11 @@
+# Step 13 comparison only, Python 3.11+; not used by the deployed app.
+# For hi_res: brew install poppler tesseract
+# First use downloads spaCy's en_core_web_sm and, for hi_res, the YOLOX layout
+# model from Hugging Face.
+unstructured[pdf]==0.27.34
+# The 2026-10-24 releases (3.0.14 / 1.0.16 / 2.0.16) break en_core_web_sm with
+# "OverflowError: Python int too large to convert to C ssize_t"; Unstructured
+# swallows the spaCy failure and returns zero elements.
+preshed==3.0.13
+murmurhash==1.0.15
+cymem==2.0.13
