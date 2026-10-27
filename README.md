@@ -75,6 +75,11 @@ SOURCES
   PyMuPDF stays. All three kept every answer in their text; Unstructured lost on structure, mixing footnotes into the
   body and merging a run-in heading with its paragraph. hi_res kept tables as rows and columns, but took 28–41 s per
   paper against 0.1–0.2 s for PyMuPDF.
+- **Step 14, LangChain comparison:** `step14_langchain.py` measures LangChain's loader, splitter and Chroma
+  wrapper against the hand-built pipeline, same MiniLM vectors. Attention phrase hit@1/5/10: ours 12/19/20, LangChain
+  defaults 9/12/18 (most 4000-character chunks run past the model's 256-token limit), LangChain sized to match
+  9/18/20, our cleaned pages with LangChain's splitter 9/19/20. Nothing adopted. Setup: `/opt/homebrew/bin/python3.12 -m venv .venv-langchain`, then
+  `.venv-langchain/bin/python -m pip install -r requirements.txt -r requirements-langchain.txt`.
 - **Answers:** all 8 answered; all 17 cited claims were checked against the cited text and matched
   (measured on the earlier 220/40 index). For "What is BERT?"
   (not in the paper) the model declined instead of answering from training data.
