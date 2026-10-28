@@ -1,0 +1,14 @@
+.conversation { display: flex; flex-direction: column; min-height: calc(100dvh - 180px); }
+.messages { flex: 1; min-width: 0; }
+.user { display: flex; justify-content: flex-end; margin: 16px 0; }
+.user > div { background: var(--pp-tint); color: var(--pp-text); border-radius: 14px; padding: 14px 18px; max-width: 80%; overflow-wrap: anywhere; line-height: 1.6; white-space: pre-wrap; }
+.composer { position: sticky; bottom: 0; display: flex; align-items: center; gap: 10px; background: white; padding: 16px 0 8px; margin-top: 16px; }
+.composer input { flex: 1; border-radius: 14px; }
+.composer button { background: var(--pp-accent); color: white; border: 0; border-radius: 10px; padding: 12px 16px; }
+.composer button:hover { background: var(--pp-accent-hover); }
+.meta { color: var(--pp-muted); font-size: .875rem; }
+.srOnly { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@media (max-width: 759px) {
+  .conversation { min-height: calc(100dvh - 380px); }
+  .user > div { max-width: 90%; }
+}

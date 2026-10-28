@@ -125,24 +125,83 @@ Both servers run on this machine only (127.0.0.1). Search only needs no API key.
 The chat page's address comes from `.streamlit/config.toml`.
 The chat page uses `PAPERPILOT_API` if set, otherwise `http://127.0.0.1:8000`.
 
-## Deploy (Streamlit Community Cloud)
+## Deploy
 
-Choose `step7_ui.py` as the main file and Python 3.12 in Advanced settings. Add these secrets as root-level
-TOML strings, with quotes so Community Cloud exposes them as environment variables:
+The Next.js app runs on Vercel and the FastAPI API runs on Fly.io. The API requires a shared password and sets a
+signed, HttpOnly, Secure session cookie for seven days. Use HTTPS for the deployed frontend. The browser calls
+only its own Vercel origin; Next.js rewrites `/api/*` to Fly, so the API needs no CORS middleware.
+
+### Fly.io API
+
+Create a Fly account and install its CLI. From the repository root, keep the settings in the supplied `fly.toml`:
+
+```sh
+fly launch --no-deploy
+fly volumes create paperpilot_data --size 1 --region lax
+fly secrets set ANTHROPIC_API_KEY=... APP_PASSWORD=... SESSION_SECRET=...
+fly deploy --ha=false
+```
+
+Choose a unique app name if `paperpilot-api` is taken, and keep `primary_region = "lax"`. `--ha=false` creates
+one machine instead of a redundant pair. The config uses one shared-cpu-1x machine with 1 GB RAM, stops it when
+idle, and starts it on a request. The 1 GB volume stores notes, cached answers and budgets at
+`/data/paperpilot.db`, selected by `PAPERPILOT_DB`. These records survive machine restarts and deploys.
+
+Set a long shared `APP_PASSWORD`. Generate a separate `SESSION_SECRET` with:
+
+```sh
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
+
+Use a separate demo Anthropic API key and set a monthly spending cap in the Anthropic Console before sharing
+the link. Enter real secret values only in the host's secret settings or CLI, never in a tracked file.
+`python deploy.py check` reports which secret names are set and the database path without printing values.
+
+The Docker build downloads the four pinned arXiv papers, builds their index and warms the ONNX embedding
+model. It runs the build and API as the same non-root user so both the model cache under
+`/home/paperpilot/.cache/chroma/onnx_models` and `chroma_db` are accessible. Cold starts reuse those files.
+At startup, the entrypoint briefly runs as root to give that user ownership of Fly's mounted `/data` directory,
+then drops privileges before starting the API.
+Do not run `python deploy.py build` against a shared local index; it is intended for the image build.
+
+### Vercel frontend
+
+Import the repository in Vercel, select `web` as the root directory, and set
+`API_URL=https://<app>.fly.dev`, using the Fly app name. Deploy, then sign in at `/login`.
+Fly secrets stay on Fly; Vercel needs only `API_URL`.
+
+The demo allows 40 paid answers per UTC day across all visitors and 10 per login session. Signing in again
+creates a new session, so the global limit and provider spending cap remain the spending backstop.
+Search, cached answers and notes work after either limit. Uploads are disabled when deployed.
+Everyone with the demo password shares the papers and notes.
+
+### Existing Streamlit Community Cloud demo
+
+Keep `step7_ui.py` as the main file and Python 3.12 in Advanced settings. Its root-level TOML secrets are:
 
 ```toml
 PAPERPILOT_DEPLOYED = "1"
 APP_PASSWORD = "..."
 ANTHROPIC_API_KEY = "..."
+SESSION_SECRET = "..."
 ```
 
-The page requires the password before building the index or calling the API. The API runs inside the page process,
-so there is no separate server to start. A cold start downloads and indexes the four pinned arXiv papers.
-Uploads are disabled on the demo.
+Add a generated `SESSION_SECRET` for explicit signing-key configuration. Existing Cloud apps that have only
+`APP_PASSWORD` continue to work: the API derives a signing key from the password when `SESSION_SECRET` is absent.
+Changing that password invalidates cookies signed with the derived key. A missing `APP_PASSWORD` fails closed.
 
-The demo allows 40 paid answers per UTC day, shared by all visitors. Cached answers, Search only and notes stay
-available after the limit. Notes, the answer cache and the budget counter reset when the app restarts.
-Set a spending cap on the demo's Anthropic key as a backstop for those resets.
+The page keeps its own password gate and calls the API in-process with a signed `streamlit` session cookie.
+All Streamlit visitors share one allowance of 10 paid answers per UTC day, within the global 40.
+A Cloud cold start still downloads and indexes the papers. Its notes, cache and budget counters reset when
+the disk resets; the separate demo API key's monthly spending cap is the backstop.
+
+### Known limits
+
+- Anyone can trigger the global failed-login limit and block new sign-ins for a minute. Existing sessions keep working.
+- Sign out only deletes the browser cookie. A copied cookie works until it expires; rotating `SESSION_SECRET` signs everyone out.
+- Each login gets a new allowance of 10 paid answers per day. The global 40/day limit and Anthropic spending cap are the real limits.
+- Streamlit Cloud and Fly keep separate budget counters. Use separate API keys or rely on the Anthropic spending cap.
+- Vercel waits at most 120 seconds for the API. Answers take well under that.
 
 ## Roadmap
 

@@ -1,0 +1,7 @@
+.label { display: block; margin-bottom: 8px; color: var(--pp-muted); font-size: .875rem; }
+.notes { display: grid; gap: 24px; margin-top: 24px; }
+.meta { color: var(--pp-muted); font-size: .875rem; margin: 0 0 8px; }
+.note { background: white; border: 1px solid var(--pp-border); padding: 16px; border-radius: 12px; overflow-wrap: anywhere; line-height: 1.6; white-space: pre-wrap; margin-bottom: 8px; }
+.form { display: grid; justify-items: start; gap: 12px; margin-top: 32px; }
+.download { display: inline-block; margin-top: 24px; }
+.error { color: var(--pp-error); overflow-wrap: anywhere; }

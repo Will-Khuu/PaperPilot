@@ -1,0 +1,7 @@
+.page { min-height: 100dvh; display: grid; place-items: center; padding: 32px 20px; }
+.form { width: 100%; max-width: 400px; display: grid; gap: 12px; }
+.form h1 { margin: 0; font-size: 1.75rem; }
+.form p { margin: 0 0 20px; color: var(--pp-muted); }
+.form button { margin-top: 8px; background: var(--pp-accent); border-color: var(--pp-accent); color: white; }
+.form button:hover { background: var(--pp-accent-hover); }
+.form .error { margin: 0; color: var(--pp-error); }

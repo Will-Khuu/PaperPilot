@@ -1,0 +1,17 @@
+.venv*
+chroma_db
+papers
+data
+out
+web
+eval
+docs
+.git
+node_modules
+*.md
+!README.md
+.env*
+.aws
+.streamlit
+__pycache__
+*.pyc

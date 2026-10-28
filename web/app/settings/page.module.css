@@ -1,0 +1,6 @@
+.settings { display: grid; gap: 16px; }
+.settings label { display: flex; justify-content: space-between; gap: 16px; line-height: 1.5; }
+.settings input { width: 100%; margin: 0 0 24px; }
+.settings output { color: var(--pp-accent); font-variant-numeric: tabular-nums; }
+.meta { color: var(--pp-muted); font-size: .875rem; }
+.error { color: var(--pp-error); overflow-wrap: anywhere; }

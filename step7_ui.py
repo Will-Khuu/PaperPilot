@@ -5,11 +5,13 @@ import html
 import os
 import re
 import sys
+import time
 
 import httpx
 import streamlit as st
 
 import deploy
+import auth
 
 API = os.environ.get("PAPERPILOT_API", "http://127.0.0.1:8000").rstrip("/")
 
@@ -18,7 +20,6 @@ API = os.environ.get("PAPERPILOT_API", "http://127.0.0.1:8000").rstrip("/")
 def api_client():
     from fastapi.testclient import TestClient
     from step7_api import app
-
     return TestClient(app, raise_server_exceptions=False)
 
 
@@ -47,7 +48,9 @@ def password_gate():
 def request(method, path, **kwargs):
     try:
         if deploy.DEPLOYED:
-            response = api_client().request(method, path, **kwargs)
+            # The page checked the password; renew the shared session cookie because the cached client outlives it.
+            cookie = auth.sign("streamlit", int(time.time()) + auth.SESSION_SECONDS)
+            response = api_client().request(method, path, headers={"Cookie": f"{auth.COOKIE_NAME}={cookie}"}, **kwargs)
         else:
             response = httpx.request(method, API + path, timeout=180, **kwargs)
         response.raise_for_status()

@@ -1,0 +1,9 @@
+.papers { display: grid; gap: 16px; margin-top: 24px; }
+.card { border: 1px solid var(--pp-border); border-radius: 12px; padding: 18px; min-width: 0; }
+.paper { display: flex; gap: 14px; align-items: center; overflow-wrap: anywhere; margin-bottom: 16px; }
+.paper > div { min-width: 0; }
+.title { font-weight: 600; margin-bottom: 4px; line-height: 1.5; }
+.meta { color: var(--pp-muted); font-size: .875rem; }
+.upload { display: grid; gap: 12px; justify-items: start; }
+.upload input { max-width: 100%; }
+.error { color: var(--pp-error); overflow-wrap: anywhere; }

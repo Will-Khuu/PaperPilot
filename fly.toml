@@ -1,0 +1,34 @@
+# fly.toml app configuration file generated for paperpilot-api on 2026-10-27T17:57:52-07:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'paperpilot-api'
+primary_region = 'lax'
+
+[build]
+[env]
+  PAPERPILOT_DB = '/data/paperpilot.db'
+  PAPERPILOT_DEPLOYED = '1'
+
+[[mounts]]
+  source = 'paperpilot_data'
+  destination = '/data'
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+
+  [[http_service.checks]]
+    interval = '30s'
+    timeout = '10s'
+    grace_period = '30s'
+    method = 'GET'
+    path = '/health'
+
+[[vm]]
+  size = 'shared-cpu-1x'
+  memory = '1gb'

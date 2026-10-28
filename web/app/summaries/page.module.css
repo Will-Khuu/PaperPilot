@@ -1,0 +1,2 @@
+.controls { display: grid; gap: 12px; justify-items: start; }
+.controls label { font-size: .875rem; color: var(--pp-muted); }

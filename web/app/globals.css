@@ -1,0 +1,33 @@
+:root {
+  color-scheme: light;
+  --pp-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Helvetica Neue", system-ui, sans-serif;
+  --pp-text: #1F2333;
+  --pp-muted: #62697B;
+  --pp-accent: #3B5BDB;
+  --pp-accent-hover: #2F4AC0;
+  --pp-tint: #EDF1FF;
+  --pp-hover: #E4EAFF;
+  --pp-surface: #F7F8FC;
+  --pp-border: #E6E8F0;
+  --pp-error: #B42318;
+  --pp-warning: #805400;
+  --pp-pdf: #D92D20;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: white; color: var(--pp-text); font-family: var(--pp-font); font-size: 16px; }
+button, input, textarea, select { font: inherit; border: 1px solid var(--pp-border); border-radius: 8px; background: white; color: var(--pp-text); }
+button { padding: 10px 14px; cursor: pointer; }
+button:hover { background: var(--pp-tint); border-color: var(--pp-accent); }
+button:disabled { opacity: .5; cursor: not-allowed; }
+input:not([type="checkbox"]):not([type="range"]), textarea, select { padding: 12px; width: 100%; min-width: 0; }
+input, textarea { caret-color: var(--pp-accent); }
+input[type="checkbox"], input[type="range"] { accent-color: var(--pp-accent); }
+textarea { resize: vertical; }
+a { color: var(--pp-accent); text-underline-offset: 3px; }
+a:hover { text-decoration: underline; }
+:focus-visible { outline: 2px solid var(--pp-accent); outline-offset: 3px; }
+::selection { background: #DCE4FF; }
+::placeholder { color: var(--pp-muted); opacity: 1; }
+h1 { font-size: 2rem; margin: 0 0 24px; }
+h2 { font-size: 1.3rem; margin: 32px 0 16px; }
+p { line-height: 1.6; }

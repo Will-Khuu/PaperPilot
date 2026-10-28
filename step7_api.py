@@ -5,11 +5,14 @@ Usage:
     python step7_api.py selftest  # requires the real index; no LLM calls
 """
 import re
+import os
+import secrets
 import sys
+import time
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, UploadFile, File
+from fastapi import Depends, FastAPI, HTTPException, UploadFile, File, Request
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator
 
@@ -20,6 +23,7 @@ from step9_summary import summarize
 import step10_notes as notes
 import step11_cache as cache
 import deploy
+import auth
 from step11_cache import index_fingerprint
 
 app = FastAPI()
@@ -33,6 +37,50 @@ async def block_demo_uploads(request, call_next):
     if deploy.DEPLOYED and request.method == "POST" and request.url.path.rstrip("/") == "/papers":
         return JSONResponse(status_code=403, content={"detail": "Uploads are disabled on the demo."})
     return await call_next(request)
+
+
+@app.middleware("http")
+async def require_session(request, call_next):
+    request.state.session_id = auth.read_session(request.cookies.get(auth.COOKIE_NAME))
+    if deploy.DEPLOYED and request.url.path not in ("/health", "/login", "/session"):
+        if not os.environ.get("APP_PASSWORD"):
+            return JSONResponse(status_code=503, content={"detail": "This demo is not configured."})
+        if request.state.session_id is None:
+            return JSONResponse(status_code=401, content={"detail": "Sign in first."})
+    return await call_next(request)
+
+
+class Login(BaseModel):
+    password: str = Field(max_length=256)
+
+
+@app.post("/login")
+def login(body: Login, response: Response):
+    if not deploy.DEPLOYED:
+        return {"authenticated": True}
+    if not os.environ.get("APP_PASSWORD"):
+        raise HTTPException(status_code=503, detail="This demo is not configured.")
+    error = auth.login_error(body.password)
+    if error == "limited":
+        raise HTTPException(status_code=429, detail="Too many failed sign-ins. Wait a minute.")
+    if error == "incorrect":
+        raise HTTPException(status_code=401, detail="Incorrect password.")
+    cookie = auth.sign(secrets.token_urlsafe(16), int(time.time()) + auth.SESSION_SECONDS)
+    response.set_cookie(auth.COOKIE_NAME, cookie, max_age=auth.SESSION_SECONDS,
+                        httponly=True, secure=True, samesite="lax", path="/")
+    return {"authenticated": True}
+
+
+@app.post("/logout")
+def logout(response: Response):
+    response.delete_cookie(auth.COOKIE_NAME, path="/", httponly=True, secure=True, samesite="lax")
+    return {"authenticated": False}
+
+
+@app.get("/session")
+def session(request: Request):
+    return {"deployed": deploy.DEPLOYED,
+            "authenticated": not deploy.DEPLOYED or request.state.session_id is not None}
 
 
 class Question(BaseModel):
@@ -69,6 +117,9 @@ class Health(BaseModel):
     chunks: int
     chunk_size: int
     chunk_overlap: int
+    answers_left: Optional[int] = None
+    daily_limit: Optional[int] = None
+    session_limit: Optional[int] = None
 
 
 class Excerpt(BaseModel):
@@ -90,6 +141,8 @@ class Source(BaseModel):
     n: int
     id: str
     label: str
+    page: Optional[int] = None
+    url: Optional[str] = None
 
 
 class NoteSource(BaseModel):
@@ -118,6 +171,9 @@ class SummarySource(BaseModel):
     n: int
     id: str
     label: str
+    paper_id: Optional[str] = None
+    page: Optional[int] = None
+    url: Optional[str] = None
 
 
 class SummaryResult(BaseModel):
@@ -149,13 +205,18 @@ class AnswerResult(SearchResult):
     cached: bool
 
 
-def get_answerer():
+def get_answerer(request: Request):
     if deploy.DEPLOYED:
         def demo_answerer(prompt, system=None):
-            if not deploy.take_llm_call():
+            reason = deploy.take_llm_call(request.state.session_id, path=notes.DB_PATH)
+            if reason == "global":
                 raise HTTPException(status_code=429, detail=(
                     f"Daily demo limit of {deploy.DAILY_LLM_LIMIT} answers reached. "
                     "Search only, cached answers and notes still work."))
+            if reason == "session":
+                raise HTTPException(status_code=429, detail=(
+                    "You've used your 10 paid answers for today. "
+                    "Search, cached answers and notes still work."))
             return ask_claude(prompt, system=system) if system else ask_claude(prompt)
 
         return demo_answerer
@@ -179,6 +240,25 @@ def get_chunks(request: Question):
 def excerpts(chunks):
     return [Excerpt(n=n, pages=page_label(chunk), **chunk)
             for n, chunk in enumerate(chunks, start=1)]
+
+
+def with_source_links(result):
+    # Enrich at response time so old cache records get links without a new cache key.
+    metadata = {}
+    if "retrieved" not in result and result["sources"]:
+        found = get_collection().get(ids=[s["id"] for s in result["sources"]], include=["metadatas"])
+        metadata = dict(zip(found["ids"], found["metadatas"]))
+    sources = []
+    for source in result["sources"]:
+        chunk = (result["retrieved"][source["n"] - 1] if "retrieved" in result
+                 else metadata.get(source["id"], {}))
+        paper_id = chunk.get("paper_id") or source.get("paper_id") or result.get("paper_id")
+        page = chunk.get("page")
+        url = None
+        if paper_id in deploy.PAPERS and page is not None:
+            url = f"{deploy.PAPERS[paper_id]}#page={page}"
+        sources.append({**source, "paper_id": paper_id, "page": page, "url": url})
+    return {**result, "sources": sources}
 
 
 @app.get("/papers", response_model=List[Paper])
@@ -226,7 +306,7 @@ def compare(request: Comparison, answerer=Depends(get_answerer)):
                           retrieval=RETRIEVAL)
     stored = cache.get(key, path=notes.DB_PATH)
     if stored is not None:
-        return {**stored, "cached": True}
+        return with_source_links({**stored, "cached": True})
     chunks = []
     for pid in request.paper_ids:
         try:
@@ -238,16 +318,26 @@ def compare(request: Comparison, answerer=Depends(get_answerer)):
         chunks.extend(found)
     result = answer_result(request, chunks, answerer, system=COMPARE_PROMPT)
     cache.put(key, result.model_dump(), path=notes.DB_PATH)
-    return result
+    return with_source_links(result.model_dump())
 
 
 @app.get("/health", response_model=Health)
-def health():
+def health(request: Request):
     collection = get_collection()
     count = collection.count()
     if count == 0:
         raise HTTPException(status_code=503, detail=EMPTY_INDEX)
-    return Health(chunks=count, **collection.metadata)
+    answers_left = None
+    if deploy.DEPLOYED:
+        answers_left = max(0, deploy.DAILY_LLM_LIMIT - deploy.llm_calls_today(path=notes.DB_PATH))
+        if request.state.session_id is not None:
+            session_left = max(0, deploy.SESSION_DAILY_LIMIT - deploy.session_calls_today(
+                request.state.session_id, path=notes.DB_PATH))
+            answers_left = min(answers_left, session_left)
+    daily_limit = deploy.DAILY_LLM_LIMIT if deploy.DEPLOYED else None
+    session_limit = deploy.SESSION_DAILY_LIMIT if deploy.DEPLOYED else None
+    return Health(chunks=count, answers_left=answers_left, daily_limit=daily_limit,
+                  session_limit=session_limit, **collection.metadata)
 
 
 @app.post("/search", response_model=SearchResult)
@@ -263,10 +353,10 @@ def ask(request: Question, answerer=Depends(get_answerer)):
                           retrieval=RETRIEVAL)
     stored = cache.get(key, path=notes.DB_PATH)
     if stored is not None:
-        return {**stored, "cached": True}
+        return with_source_links({**stored, "cached": True})
     result = answer_result(request, get_chunks(request), answerer)
     cache.put(key, result.model_dump(), path=notes.DB_PATH)
-    return result
+    return with_source_links(result.model_dump())
 
 
 @app.post("/notes")
@@ -305,13 +395,13 @@ def summarize_paper(request: SummaryRequest, answerer=Depends(get_answerer)):
                           fingerprint=index_fingerprint([request.paper_id], collection=collection))
     stored = cache.get(key, path=notes.DB_PATH)
     if stored is not None:
-        return {**stored, "cached": True}
+        return with_source_links({**stored, "cached": True})
     try:
         result = SummaryResult(**summarize(request.paper_id, answerer=answerer, collection=collection), cached=False)
     except RuntimeError as e:
         raise HTTPException(status_code=502, detail=str(e)) from None
     cache.put(key, result.model_dump(), path=notes.DB_PATH)
-    return result
+    return with_source_links(result.model_dump())
 
 
 def answer_result(request, chunks, answerer, system=None):
@@ -329,6 +419,21 @@ def answer_result(request, chunks, answerer, system=None):
 
 
 def selftest():
+    from shutil import copytree
+    from tempfile import TemporaryDirectory
+    from unittest.mock import patch
+    import step3_embed
+
+    # Chroma opens SQLite read-write even for queries. Test a copy, never the shared index.
+    with TemporaryDirectory() as directory:
+        index = Path(directory) / "chroma_db"
+        copytree(step3_embed.DB_PATH, index)
+        with patch.object(step3_embed, "DB_PATH", str(index)), \
+             patch(__name__ + ".ask_claude", side_effect=AssertionError("Selftests must never call the paid answerer")):
+            test_local_api()
+
+
+def test_local_api():
     """Offline local server tests; requires the real index built by step3 ingest."""
     from unittest.mock import patch
     from tempfile import TemporaryDirectory
@@ -359,8 +464,10 @@ def selftest():
              patch.object(deploy, "DEPLOYED", False), TestClient(app) as client:
             response = client.get("/health")
             assert response.status_code == 200, "health reads the real index"
-            assert response.json() == {"chunks": get_collection().count(), **get_collection().metadata}, \
+            assert response.json() == {"chunks": get_collection().count(), **get_collection().metadata,
+                                       "answers_left": None, "daily_limit": None, "session_limit": None}, \
                 "health reports index count and stored settings"
+            assert client.get("/session").json() == {"deployed": False, "authenticated": True}
             with patch(__name__ + ".get_collection") as empty_collection:
                 empty_collection.return_value.count.return_value = 0
                 empty_collection.return_value.metadata = None
@@ -378,12 +485,22 @@ def selftest():
             result = response.json()
             assert result["sources"] == [
                 {"n": n, "id": found[n - 1]["id"], "label": source_label(found[n - 1]),
-                 "paper_id": found[n - 1]["paper_id"], "title": found[n - 1]["title"]}
+                 "paper_id": found[n - 1]["paper_id"], "title": found[n - 1]["title"],
+                 "page": found[n - 1]["page"],
+                 "url": f"{deploy.PAPERS[found[n - 1]['paper_id']]}#page={found[n - 1]['page']}"}
                 for n in (1, 2)
             ], "citations map to the same numbered excerpts, sorted and deduplicated"
             assert result["invalid"] == [99] and result["fallback"], "invalid citations and fallback are flagged"
             assert prompts[-1] == build_prompt(question, found), "answerer gets the existing numbered prompt"
             assert result["cached"] is False
+            legacy = {**result, "sources": [{k: v for k, v in s.items() if k not in ("page", "url")}
+                                            for s in result["sources"]]}
+            with patch.object(cache, "get", return_value=legacy):
+                assert client.post("/ask", json=payload).json() == {**result, "cached": True}
+                with patch.object(deploy, "PAPERS", {}):
+                    unlinked = client.post("/ask", json=payload).json()
+                    assert all(s["page"] is not None and s["url"] is None for s in unlinked["sources"]), \
+                        "papers outside the demo list retain pages without links"
             with patch(__name__ + ".retrieve", side_effect=AssertionError("cache hit retrieved chunks")):
                 repeated = client.post("/ask", json=payload).json()
                 assert repeated == {**result, "cached": True} and len(prompts) == 1
@@ -428,6 +545,14 @@ def selftest():
             assert [c["n"] for c in result["retrieved"]] == list(range(1, 7))
             assert [c["paper_id"] for c in result["retrieved"]] == [ids[0]] * 3 + [ids[1]] * 3
             assert [c["paper_id"] for c in result["sources"]] == ids
+            for source in result["sources"]:
+                chunk = result["retrieved"][source["n"] - 1]
+                assert source["page"] == chunk["page"]
+                assert source["url"] == f"{deploy.PAPERS[chunk['paper_id']]}#page={chunk['page']}"
+            legacy = {**result, "sources": [{k: v for k, v in s.items() if k not in ("page", "url")}
+                                            for s in result["sources"]]}
+            with patch.object(cache, "get", return_value=legacy):
+                assert client.post("/compare", json={"question": question, "paper_ids": ids}).json() == {**result, "cached": True}
             assert result["cached"] is False
             before = len(prompts)
             assert client.post("/compare", json={"question": question, "paper_ids": ids}).json()["cached"] is True
@@ -462,9 +587,20 @@ def selftest():
             result = response.json()
             chunks = paper_excerpts(pid)
             assert result["sources"] == [
-                {"n": n, "id": chunks[n - 1]["id"], "label": source_label(chunks[n - 1])}
+                {"n": n, "id": chunks[n - 1]["id"], "label": source_label(chunks[n - 1]),
+                 "paper_id": pid, "page": chunks[n - 1]["page"],
+                 "url": f"{deploy.PAPERS[pid]}#page={chunks[n - 1]['page']}"}
                 for n in (1, 2)
             ], "summary citations map to the paper's reading order"
+            legacy = {**result, "sources": [{k: v for k, v in s.items() if k not in ("paper_id", "page", "url")}
+                                            for s in result["sources"]]}
+            with patch.object(cache, "get", return_value=legacy):
+                assert client.post("/summarize", json={"paper_id": pid}).json() == {**result, "cached": True}
+                for source in legacy["sources"]:
+                    source["label"] = "A label with no page number"
+                linked = client.post("/summarize", json={"paper_id": pid}).json()
+                assert [(s["page"], s["url"]) for s in linked["sources"]] == [
+                    (s["page"], s["url"]) for s in result["sources"]], "summary links use chunk metadata, not labels"
             assert result["invalid"] == [999] and result["fallback"], "summary warnings survive serialization"
             assert result["chunks_used"] == len(chunks) and "refused" not in result
             assert prompts[-1] == build_prompt(f"Summarize this paper: {result['title']}", chunks)
@@ -539,6 +675,8 @@ def selftest():
                     assert response.status_code == 503 and response.json() == {"detail": EMPTY_INDEX}, \
                         "empty index becomes 503 without changing the real index"
             test_deployed(client, payload, ids, pid, fake_answerer)
+            test_auth(payload, fake_answerer)
+            test_session_budget(payload, fake_answerer)
     finally:
         app.dependency_overrides.clear()
         app.dependency_overrides.update(previous)
@@ -551,10 +689,10 @@ def test_deployed(client, payload, ids, pid, fake_answerer):
 
     with TemporaryDirectory() as directory:
         path = Path(directory) / "budget.db"
-        take_call = deploy.take_llm_call
         with patch.object(deploy, "DEPLOYED", True), patch.object(deploy, "DAILY_LLM_LIMIT", 2), \
-             patch.object(deploy, "take_llm_call", side_effect=lambda: take_call(path=path)), \
+             patch.object(notes, "DB_PATH", path), patch.dict(os.environ, {"APP_PASSWORD": "test-password"}), \
              patch(__name__ + ".ask_claude", side_effect=fake_answerer) as paid:
+            client.cookies.set(auth.COOKIE_NAME, auth.sign("budget-tests", int(time.time()) + 3600))
             app.dependency_overrides.pop(get_answerer, None)
             assert client.post("/papers", content=b"not even multipart").status_code == 403
             response = client.post("/papers", files={"file": ("demo.pdf", b"%PDF", "application/pdf")})
@@ -564,15 +702,20 @@ def test_deployed(client, payload, ids, pid, fake_answerer):
                 cache.clear(path=notes.DB_PATH)
                 path.unlink(missing_ok=True)
                 assert deploy.llm_calls_today(path=path) == 0
+                assert client.get("/health").json()["answers_left"] == 2
+                assert client.get("/health").json()["daily_limit"] == 2, "health uses the configured budget"
                 first = client.post(endpoint, json=body)
                 assert first.status_code == 200 and not first.json()["cached"]
                 assert deploy.llm_calls_today(path=path) == 1
+                assert client.get("/health").json()["answers_left"] == 1
                 before = paid.call_count
                 assert client.post(endpoint, json=body).json()["cached"]
                 assert paid.call_count == before and deploy.llm_calls_today(path=path) == 1
                 cache.clear(path=notes.DB_PATH)
                 assert client.post(endpoint, json=body).status_code == 200
                 assert deploy.llm_calls_today(path=path) == 2
+                assert client.get("/health").json()["answers_left"] == 0
+                assert client.get("/health").json()["daily_limit"] == 2, "the limit stays fixed as answers are spent"
                 assert client.post(endpoint, json=body).json()["cached"], "cached answers work at the limit"
                 cache.clear(path=notes.DB_PATH)
                 before = paid.call_count
@@ -582,6 +725,8 @@ def test_deployed(client, payload, ids, pid, fake_answerer):
                 assert paid.call_count == before and deploy.llm_calls_today(path=path) == 2
             assert client.post("/search", json=payload).status_code == 200
             assert client.get("/health").status_code == 200
+            with patch.object(deploy, "llm_calls_today", return_value=3):
+                assert client.get("/health").json()["answers_left"] == 0, "remaining answers never go negative"
             assert client.get("/papers").status_code == 200
             note = client.post("/notes", json={"paper_id": pid, "text": "Still available"}).json()
             assert client.get("/notes").status_code == 200
@@ -589,8 +734,156 @@ def test_deployed(client, payload, ids, pid, fake_answerer):
             assert deploy.llm_calls_today(path=path) == 2
             path.unlink()
             with ThreadPoolExecutor(max_workers=8) as pool:
-                accepted = list(pool.map(lambda _: take_call(path=path), range(16)))
-            assert sum(accepted) == 2 and deploy.llm_calls_today(path=path) == 2
+                accepted = list(pool.map(lambda _: deploy.take_llm_call("budget-tests", path=path), range(16)))
+            assert accepted.count(None) == 2 and deploy.llm_calls_today(path=path) == 2
+            client.cookies.clear()
+
+
+def test_auth(payload, fake_answerer):
+    from collections import deque
+    from concurrent.futures import ThreadPoolExecutor
+    from tempfile import TemporaryDirectory
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+
+    with TemporaryDirectory() as directory, patch.object(notes, "DB_PATH", Path(directory) / "auth.db"), \
+         patch.object(deploy, "DEPLOYED", True), patch.object(auth, "failed_logins", deque()), \
+         patch.dict(os.environ, {"APP_PASSWORD": "", "SESSION_SECRET": ""}), \
+         patch(__name__ + ".ask_claude", side_effect=fake_answerer), \
+         TestClient(app, base_url="https://testserver") as client:
+        for endpoint, body in (("/search", payload), ("/login", {"password": "test-password"})):
+            response = client.post(endpoint, json=body)
+            assert response.status_code == 503 and response.json()["detail"] == "This demo is not configured."
+        assert client.get("/health").status_code == 200
+        assert client.get("/session").json() == {"deployed": True, "authenticated": False}
+        os.environ["APP_PASSWORD"] = "test-password"
+        assert client.post("/login", json={"password": "x" * 257}).status_code == 422
+        assert not auth.failed_logins, "oversized passwords are rejected before login attempts"
+        for _ in range(10):
+            response = client.post("/login", json={"password": "wrong"})
+            assert response.status_code == 401 and response.json()["detail"] == "Incorrect password."
+        response = client.post("/login", json={"password": "test-password"})
+        assert response.status_code == 429
+        assert response.json()["detail"] == "Too many failed sign-ins. Wait a minute."
+        with patch.object(auth.time, "monotonic", return_value=time.monotonic() + 61):
+            response = client.post("/login", json={"password": "test-password"})
+        assert response.status_code == 200 and response.json() == {"authenticated": True}
+        header = response.headers["set-cookie"].lower()
+        assert all(part in header for part in ("httponly", "secure", "samesite=lax", "path=/", "max-age=604800"))
+        cookie = client.cookies.get(auth.COOKIE_NAME)
+        session_id = auth.read_session(cookie)
+        assert session_id and session_id != "streamlit"
+        assert client.get("/session").json()["authenticated"]
+        assert client.post("/search", json=payload).status_code == 200, "password-derived signing key works"
+        with patch.dict(os.environ, {"APP_PASSWORD": "changed-password"}):
+            assert auth.read_session(cookie) is None, "changing the fallback password signs everyone out"
+        os.environ["SESSION_SECRET"] = "test-signing-secret"
+        assert auth.read_session(cookie) is None, "a new signing key rejects old signatures"
+        response = client.post("/login", json={"password": "test-password"})
+        cookie = client.cookies.get(auth.COOKIE_NAME)
+        assert response.status_code == 200 and auth.read_session(cookie)
+        assert client.post("/search", json=payload).status_code == 200
+        response = client.post("/logout")
+        assert response.json() == {"authenticated": False} and "max-age=0" in response.headers["set-cookie"].lower()
+        assert client.cookies.get(auth.COOKIE_NAME) is None
+        assert client.get("/session").json()["authenticated"] is False
+        bad_signature = cookie[:-1] + ("0" if cookie[-1] != "0" else "1")
+        invalid_cookies = (None, bad_signature, auth.sign("expired", int(time.time()) - 1), "malformed",
+                           "a.not-a-time.signature", "a." + "9" * 100 + "." + "a" * 64)
+        for invalid in invalid_cookies:
+            client.cookies.clear()
+            if invalid is not None:
+                client.cookies.set(auth.COOKIE_NAME, invalid)
+            response = client.post("/search", json=payload)
+            assert response.status_code == 401 and response.json()["detail"] == "Sign in first."
+            assert client.get("/health").status_code == 200
+            assert client.get("/session").json()["authenticated"] is False
+        auth.failed_logins.clear()
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            errors = list(pool.map(lambda _: auth.login_error("wrong"), range(24)))
+        assert errors.count("incorrect") == 10 and errors.count("limited") == 14
+
+        # The cached client must still work after its first cookie would have expired.
+        from step7_ui import api_client, request
+
+        api_client.clear()
+        try:
+            streamlit = api_client()
+            now = time.time()
+            for moment in (now, now + auth.SESSION_SECONDS + 86400):
+                with patch.object(time, "time", return_value=moment):
+                    result, error = request("POST", "/search", json=payload)
+                    assert error is None and result["retrieved"], "Streamlit renews its cookie on each request"
+                    assert api_client() is streamlit, "cookie renewal keeps the cached client"
+        finally:
+            api_client.clear()
+
+
+def test_session_budget(payload, fake_answerer):
+    from concurrent.futures import ThreadPoolExecutor
+    from tempfile import TemporaryDirectory
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+
+    with TemporaryDirectory() as directory, patch.object(notes, "DB_PATH", Path(directory) / "sessions.db"), \
+         patch.object(deploy, "DEPLOYED", True), \
+         patch.dict(os.environ, {"APP_PASSWORD": "test-password", "SESSION_SECRET": "test-signing-secret"}), \
+         patch(__name__ + ".ask_claude", side_effect=fake_answerer) as paid, \
+         TestClient(app, base_url="https://testserver") as client:
+        def use_session(session_id):
+            client.cookies.clear()
+            client.cookies.set(auth.COOKIE_NAME, auth.sign(session_id, int(time.time()) + 3600))
+
+        def ask_uncached():
+            cache.clear(path=notes.DB_PATH)
+            return client.post("/ask", json=payload)
+
+        assert client.get("/health").json()["answers_left"] == 40
+        use_session("A")
+        assert client.get("/health").json()["answers_left"] == 10
+        assert client.get("/health").json()["session_limit"] == 10
+        for _ in range(10):
+            assert ask_uncached().status_code == 200
+        assert deploy.session_calls_today("A", path=notes.DB_PATH) == 10
+        assert client.get("/health").json()["answers_left"] == 0
+        before = paid.call_count
+        assert client.post("/ask", json=payload).json()["cached"], "cache is free at the session limit"
+        response = ask_uncached()
+        assert response.status_code == 429 and response.json()["detail"] == (
+            "You've used your 10 paid answers for today. Search, cached answers and notes still work.")
+        assert paid.call_count == before and deploy.llm_calls_today(path=notes.DB_PATH) == 10
+        for session_id in ("B", "C"):
+            use_session(session_id)
+            for _ in range(10):
+                assert ask_uncached().status_code == 200
+        use_session("D")
+        for _ in range(6):
+            assert ask_uncached().status_code == 200
+        use_session("E")
+        health = client.get("/health").json()
+        assert health["answers_left"] == 4 and health["daily_limit"] == 40
+        for _ in range(4):
+            assert ask_uncached().status_code == 200
+        use_session("F")
+        assert client.get("/health").json()["answers_left"] == 0
+        before = paid.call_count
+        response = ask_uncached()
+        assert response.status_code == 429 and response.json()["detail"].startswith("Daily demo limit of 40 answers reached.")
+        assert paid.call_count == before
+        assert deploy.session_calls_today("F", path=notes.DB_PATH) == 0, "global rejection does not charge the session"
+        client.cookies.clear()
+        assert client.get("/health").json()["answers_left"] == 0, "anonymous health reports only global allowance"
+
+        concurrent_path = Path(directory) / "concurrent.db"
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            accepted = list(pool.map(lambda _: deploy.take_llm_call("same", path=concurrent_path), range(24)))
+        assert accepted.count(None) == 10 and accepted.count("session") == 14
+        assert deploy.llm_calls_today(path=concurrent_path) == deploy.session_calls_today("same", path=concurrent_path) == 10
+        concurrent_path = Path(directory) / "global.db"
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            accepted = list(pool.map(lambda i: deploy.take_llm_call(str(i), path=concurrent_path), range(64)))
+        assert accepted.count(None) == 40 and accepted.count("global") == 24
+        assert deploy.llm_calls_today(path=concurrent_path) == 40
 
 
 def test_uploads(client, indexed):

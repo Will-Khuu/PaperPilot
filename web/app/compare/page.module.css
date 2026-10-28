@@ -1,0 +1,4 @@
+.picker { border: 1px solid var(--pp-border); border-radius: 12px; padding: 16px; margin: 0 0 16px; min-width: 0; }
+.picker legend { padding: 0 6px; font-size: .875rem; color: var(--pp-muted); }
+.picker label { display: flex; gap: 10px; align-items: flex-start; padding: 8px 0; line-height: 1.5; overflow-wrap: anywhere; cursor: pointer; }
+.picker input { margin-top: 5px; flex-shrink: 0; }

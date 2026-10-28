@@ -1,12 +1,13 @@
 """Step 10: store paper notes. Run python step10_notes.py selftest offline."""
 import json
+import os
 import sqlite3
 import sys
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
-DB_PATH = Path(__file__).parent / "data" / "paperpilot.db"
+DB_PATH = Path(os.environ.get("PAPERPILOT_DB", Path(__file__).parent / "data" / "paperpilot.db"))
 
 
 def connect(path=DB_PATH):
