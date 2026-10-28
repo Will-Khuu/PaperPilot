@@ -1,5 +1,5 @@
 // These fields follow step7_api.py; optional Pydantic fields arrive as null.
-export type Paper = { paper_id: string; title: string; chunks: number; pages: number };
+export type Paper = { paper_id: string; title: string; chunks: number; pages: number; builtin: boolean };
 export type Health = {
   chunks: number;
   chunk_size: number;
@@ -8,7 +8,13 @@ export type Health = {
   daily_limit: number | null;
   session_limit: number | null;
 };
-export type Session = { deployed: boolean; authenticated: boolean };
+export type Session = {
+  deployed: boolean;
+  authenticated: boolean;
+  role: "owner" | "visitor" | null;
+  can_upload: boolean;
+  max_upload_mb: number;
+};
 export type Excerpt = {
   paper_id: string; n: number; id: string; section: string; title: string;
   page: number; page_end: number; pages: string; distance: number | null; text: string;

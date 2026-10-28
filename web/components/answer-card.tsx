@@ -11,6 +11,11 @@ export function StatusCard({ text, error = false }: { text: string; error?: bool
     role={error ? "alert" : "status"}><span className={error ? styles.error : styles.meta}>{text}</span></div></div>;
 }
 
+function sourceUrl(url: string) {
+  // Uploaded PDFs use API-relative links; send them through the same-origin proxy too.
+  return url.startsWith("/") ? `/api${url}` : url;
+}
+
 export function AnswerCard({ result, paperIds }: { result: Result; paperIds: string[] }) {
   const [saving, setSaving] = useState(false);
   const [notice, setNotice] = useState("");
@@ -56,7 +61,7 @@ export function AnswerCard({ result, paperIds }: { result: Result; paperIds: str
     <div className={styles.text}>{text}</div>
     {cited && <div className={styles.sources}><strong>Sources:</strong>
       <ul>{cited.sources.map(source => <li key={source.n}>
-        {source.url ? <a href={source.url} target="_blank" rel="noopener noreferrer">[{source.n}] {source.label}</a>
+        {source.url ? <a href={sourceUrl(source.url)} target="_blank" rel="noopener noreferrer">[{source.n}] {source.label}</a>
           : <>[{source.n}] {source.label}</>}
       </li>)}</ul>
     </div>}

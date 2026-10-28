@@ -54,6 +54,11 @@ def delete_note(note_id, path=DB_PATH):
         return connection.execute("DELETE FROM notes WHERE id = ?", (note_id,)).rowcount > 0
 
 
+def delete_notes_for_paper(paper_id, path=DB_PATH):
+    with closing(connect(path)) as connection, connection:
+        connection.execute("DELETE FROM notes WHERE paper_id = ?", (paper_id,))
+
+
 def export_markdown(paper_id, title, path=DB_PATH):
     parts = [f"# Notes: {title}"]
     for note in reversed(list_notes(paper_id, path=path)):

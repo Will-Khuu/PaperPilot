@@ -151,9 +151,9 @@ def ask_claude(prompt, system=SYSTEM_PROMPT):
         )
     except anthropic.APIStatusError as e:
         reason = e.body.get("error", {}).get("message", e.message) if isinstance(e.body, dict) else e.message
-        raise RuntimeError(f"API error {e.status_code}: {reason}") from None
-    except anthropic.APIConnectionError:
-        raise RuntimeError("Could not reach the Anthropic API. Check the internet connection.") from None
+        raise RuntimeError(f"API error {e.status_code}: {reason}") from e
+    except anthropic.APIConnectionError as e:
+        raise RuntimeError("Could not reach the Anthropic API. Check the internet connection.") from e
     if response.stop_reason == "refusal":
         raise RuntimeError("Claude declined to answer this question.")
     if response.stop_reason == "max_tokens":

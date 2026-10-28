@@ -5,11 +5,14 @@
 
 app = 'paperpilot-api'
 primary_region = 'lax'
+swap_size_mb = 512
 
 [build]
 [env]
   PAPERPILOT_DB = '/data/paperpilot.db'
   PAPERPILOT_DEPLOYED = '1'
+  PAPERPILOT_INDEX_DIR = '/data/chroma_db'
+  PAPERPILOT_PAPERS_DIR = '/data/papers'
 
 [[mounts]]
   source = 'paperpilot_data'

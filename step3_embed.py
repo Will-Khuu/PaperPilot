@@ -22,8 +22,9 @@ from chromadb.utils.embedding_functions.onnx_mini_lm_l6_v2 import ONNXMiniLM_L6_
 from step1_parse import clean, paper_title, parse
 from step2_chunk import CHUNK_OVERLAP, CHUNK_SIZE, chunk
 from step12_hybrid import B, K1, RRF_K, bm25_scores, fuse
+from deploy import INDEX_DIR, PAPERS
 
-DB_PATH = str(Path(__file__).parent / "chroma_db")
+DB_PATH = str(INDEX_DIR)
 EMPTY_INDEX = "the index is empty; run `python step3_embed.py ingest papers/attention.pdf` first"
 COLLECTION = "papers"
 # Hybrid failed the Step 12 adoption rule (see out/eval/hybrid-*.json); switch to "hybrid" to try it.
@@ -73,11 +74,14 @@ def paper_chunks(pdf_path, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
 
 
 def add_chunks(collection, chunks):
-    collection.add(
-        ids=[c["id"] for c in chunks],
-        documents=[c["text"] for c in chunks],
-        metadatas=[{k: c[k] for k in CHUNK_FIELDS} for c in chunks],
-    )
+    # Batches keep embedding memory flat on a 1 GB machine; the vectors are the same.
+    for start in range(0, len(chunks), 32):
+        batch = chunks[start:start + 32]
+        collection.add(
+            ids=[c["id"] for c in batch],
+            documents=[c["text"] for c in batch],
+            metadatas=[{k: c[k] for k in CHUNK_FIELDS} for c in batch],
+        )
 
 
 def ingest(pdf_path, size=CHUNK_SIZE, overlap=CHUNK_OVERLAP):
@@ -108,7 +112,8 @@ def list_papers(collection=None):
     for meta in collection.get(include=["metadatas"])["metadatas"]:
         pid = meta["paper_id"]
         if pid not in papers:
-            papers[pid] = {"paper_id": pid, "title": meta["title"], "chunks": 0, "pages": 0}
+            papers[pid] = {"paper_id": pid, "title": meta["title"], "chunks": 0, "pages": 0,
+                           "builtin": pid in PAPERS}
         papers[pid]["chunks"] += 1
         papers[pid]["pages"] = max(papers[pid]["pages"], meta["page_end"])
     return [papers[pid] for pid in sorted(papers)]

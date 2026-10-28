@@ -6,15 +6,20 @@ Usage:
 """
 import re
 import os
+import math
 import secrets
 import sys
 import time
 from pathlib import Path
+from threading import Lock
 from typing import List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, UploadFile, File, Request
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, field_validator
+from starlette.concurrency import run_in_threadpool
+from anthropic import APIConnectionError, APIStatusError, APITimeoutError
+import fitz
 
 from step3_embed import EMPTY_INDEX, RETRIEVAL, get_collection, ingest, list_papers, retrieve
 from step4_answer import COMPARE_PROMPT, SUMMARY_PROMPT, SYSTEM_PROMPT, MODEL, ask_claude, build_prompt, check_answer, page_label, source_label
@@ -24,24 +29,48 @@ import step10_notes as notes
 import step11_cache as cache
 import deploy
 import auth
+from deploy import PAPERS_DIR
 from step11_cache import index_fingerprint
 
 app = FastAPI()
-PAPERS_DIR = Path(__file__).parent / "papers"
-MAX_UPLOAD = 20 * 1024 * 1024
+paper_lock = Lock()
+BUSY_LIBRARY = "Another upload is in progress. Try again in a minute."
+
+
+def configured_upload_mb():
+    try:
+        value = float(os.environ.get("PAPERPILOT_MAX_UPLOAD_MB", "4"))
+        if not math.isfinite(value * 1024 * 1024) or value <= 0:
+            raise ValueError
+        return value
+    except ValueError:
+        print("Warning: invalid PAPERPILOT_MAX_UPLOAD_MB; using 4 MB.", file=sys.stderr)
+        return 4.0
+
+
+DEPLOYED_UPLOAD_MB = configured_upload_mb()
+DEPLOYED_UPLOAD_BYTES = int(DEPLOYED_UPLOAD_MB * 1024 * 1024)
+
+
+def max_upload_mb():
+    return DEPLOYED_UPLOAD_MB if deploy.DEPLOYED else 20
 
 
 @app.middleware("http")
 async def block_demo_uploads(request, call_next):
     # Reject before FastAPI's multipart parser reads the upload body.
-    if deploy.DEPLOYED and request.method == "POST" and request.url.path.rstrip("/") == "/papers":
-        return JSONResponse(status_code=403, content={"detail": "Uploads are disabled on the demo."})
+    path = request.url.path.rstrip("/")
+    changes_papers = ((request.method == "POST" and path == "/papers") or
+                      (request.method == "DELETE" and re.fullmatch(r"/papers/[^/]+", path)))
+    if deploy.DEPLOYED and changes_papers and request.state.role != "owner":
+        return JSONResponse(status_code=403, content={"detail": "Only the owner can add or delete papers."})
     return await call_next(request)
 
 
 @app.middleware("http")
 async def require_session(request, call_next):
-    request.state.session_id = auth.read_session(request.cookies.get(auth.COOKIE_NAME))
+    session = auth.read_session(request.cookies.get(auth.COOKIE_NAME))
+    request.state.session_id, request.state.role = session if session else (None, None)
     if deploy.DEPLOYED and request.url.path not in ("/health", "/login", "/session"):
         if not os.environ.get("APP_PASSWORD"):
             return JSONResponse(status_code=503, content={"detail": "This demo is not configured."})
@@ -60,12 +89,12 @@ def login(body: Login, response: Response):
         return {"authenticated": True}
     if not os.environ.get("APP_PASSWORD"):
         raise HTTPException(status_code=503, detail="This demo is not configured.")
-    error = auth.login_error(body.password)
+    role, error = auth.check_login(body.password)
     if error == "limited":
         raise HTTPException(status_code=429, detail="Too many failed sign-ins. Wait a minute.")
     if error == "incorrect":
         raise HTTPException(status_code=401, detail="Incorrect password.")
-    cookie = auth.sign(secrets.token_urlsafe(16), int(time.time()) + auth.SESSION_SECONDS)
+    cookie = auth.sign(secrets.token_urlsafe(16), role, int(time.time()) + auth.SESSION_SECONDS)
     response.set_cookie(auth.COOKIE_NAME, cookie, max_age=auth.SESSION_SECONDS,
                         httponly=True, secure=True, samesite="lax", path="/")
     return {"authenticated": True}
@@ -80,7 +109,10 @@ def logout(response: Response):
 @app.get("/session")
 def session(request: Request):
     return {"deployed": deploy.DEPLOYED,
-            "authenticated": not deploy.DEPLOYED or request.state.session_id is not None}
+            "authenticated": not deploy.DEPLOYED or request.state.session_id is not None,
+            "role": request.state.role,
+            "can_upload": not deploy.DEPLOYED or request.state.role == "owner",
+            "max_upload_mb": max_upload_mb()}
 
 
 class Question(BaseModel):
@@ -111,6 +143,7 @@ class Paper(BaseModel):
     title: str
     chunks: int
     pages: int
+    builtin: bool
 
 
 class Health(BaseModel):
@@ -208,7 +241,9 @@ class AnswerResult(SearchResult):
 def get_answerer(request: Request):
     if deploy.DEPLOYED:
         def demo_answerer(prompt, system=None):
-            reason = deploy.take_llm_call(request.state.session_id, path=notes.DB_PATH)
+            if not os.environ.get("ANTHROPIC_API_KEY"):
+                raise HTTPException(status_code=503, detail="This demo is not configured.")
+            day, reason = deploy.take_llm_call(request.state.session_id, path=notes.DB_PATH)
             if reason == "global":
                 raise HTTPException(status_code=429, detail=(
                     f"Daily demo limit of {deploy.DAILY_LLM_LIMIT} answers reached. "
@@ -217,7 +252,15 @@ def get_answerer(request: Request):
                 raise HTTPException(status_code=429, detail=(
                     "You've used your 10 paid answers for today. "
                     "Search, cached answers and notes still work."))
-            return ask_claude(prompt, system=system) if system else ask_claude(prompt)
+            try:
+                return ask_claude(prompt, system=system) if system else ask_claude(prompt)
+            except RuntimeError as error:
+                # Timeouts may have generated billed tokens on the server, as do
+                # refusals and cut-offs. Refund only other API/connection failures.
+                cause = error.__cause__
+                if isinstance(cause, (APIConnectionError, APIStatusError)) and not isinstance(cause, APITimeoutError):
+                    deploy.release_llm_call(request.state.session_id, day, path=notes.DB_PATH)
+                raise
 
         return demo_answerer
     return ask_claude
@@ -257,6 +300,8 @@ def with_source_links(result):
         url = None
         if paper_id in deploy.PAPERS and page is not None:
             url = f"{deploy.PAPERS[paper_id]}#page={page}"
+        elif paper_id and page is not None:
+            url = f"/papers/{paper_id}/pdf#page={page}"
         sources.append({**source, "paper_id": paper_id, "page": page, "url": url})
     return {**result, "sources": sources}
 
@@ -268,21 +313,48 @@ def papers():
 
 @app.post("/papers", response_model=Paper)
 async def upload_paper(file: UploadFile = File(...)):
-    # Read one extra byte to detect oversized files without loading the whole body.
-    data = await file.read(MAX_UPLOAD + 1)
-    await file.close()
-    if len(data) > MAX_UPLOAD:
-        raise HTTPException(status_code=422, detail="PDF must be at most 20 MB")
-    name = (file.filename or "").replace("\\", "/").split("/")[-1]
-    if not name.lower().endswith(".pdf") or not data.startswith(b"%PDF"):
-        raise HTTPException(status_code=422, detail="Upload a PDF filename and PDF contents")
-    paper_id = re.sub(r"[^a-z0-9-]", "", Path(name).stem.lower())
-    if not paper_id:
-        raise HTTPException(status_code=422, detail="Filename must contain a letter, digit or hyphen")
-    if any(p["paper_id"] == paper_id for p in list_papers()):
+    if not paper_lock.acquire(blocking=False):
+        await file.close()
+        raise HTTPException(status_code=409, detail=BUSY_LIBRARY)
+    try:
+        # Read one extra byte to detect oversized files without loading the whole body.
+        limit_mb = max_upload_mb()
+        limit = DEPLOYED_UPLOAD_BYTES if deploy.DEPLOYED else 20 * 1024 * 1024
+        data = await file.read(limit + 1)
+        if len(data) > limit:
+            raise HTTPException(status_code=422, detail=f"PDF must be at most {limit_mb:g} MB")
+        name = (file.filename or "").replace("\\", "/").split("/")[-1]
+        if not name.lower().endswith(".pdf") or not data.startswith(b"%PDF"):
+            raise HTTPException(status_code=422, detail="Upload a PDF filename and PDF contents")
+        paper_id = re.sub(r"[^a-z0-9-]", "", Path(name).stem.lower())
+        if not paper_id:
+            raise HTTPException(status_code=422, detail="Filename must contain a letter, digit or hyphen")
+        # Parsing and embedding can take seconds; keep health and search requests responsive.
+        return await run_in_threadpool(save_paper, paper_id, data)
+    finally:
+        paper_lock.release()
+        await file.close()
+
+
+def save_paper(paper_id, data):
+    indexed = list_papers()
+    if any(p["paper_id"] == paper_id for p in indexed):
         raise HTTPException(status_code=409, detail=f"Paper {paper_id} is already indexed")
+    if len(indexed) >= 20:
+        raise HTTPException(status_code=409, detail="The library is full (20 papers). Delete one first.")
+    try:
+        with fitz.open(stream=data, filetype="pdf") as pdf:
+            if pdf.page_count > 60:
+                raise HTTPException(status_code=422, detail="PDFs over 60 pages aren't supported here.")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=422, detail="Could not parse or index this PDF") from None
     path = PAPERS_DIR / f"{paper_id}.pdf"
     PAPERS_DIR.mkdir(parents=True, exist_ok=True)
+    # A crash after saving but before indexing can leave an orphan PDF. The index
+    # check above protects real papers; reclaim this name while holding paper_lock.
+    path.unlink(missing_ok=True)
     try:
         # Exclusive creation also prevents overwriting a file or following a symlink.
         with path.open("xb") as saved:
@@ -296,6 +368,36 @@ async def upload_paper(file: UploadFile = File(...)):
         path.unlink(missing_ok=True)
         get_collection().delete(where={"paper_id": paper_id})
         raise HTTPException(status_code=422, detail="Could not parse or index this PDF") from None
+
+
+@app.delete("/papers/{paper_id}", status_code=204)
+def delete_paper(paper_id: str):
+    if not paper_lock.acquire(blocking=False):
+        raise HTTPException(status_code=409, detail=BUSY_LIBRARY)
+    try:
+        if not re.fullmatch(r"[a-z0-9-]+", paper_id) or not any(
+                paper["paper_id"] == paper_id for paper in list_papers()):
+            raise HTTPException(status_code=404, detail="Paper not found")
+        if paper_id in deploy.PAPERS:
+            raise HTTPException(status_code=403, detail="Built-in papers can't be deleted.")
+        get_collection().delete(where={"paper_id": paper_id})
+        (PAPERS_DIR / f"{paper_id}.pdf").unlink(missing_ok=True)
+        notes.delete_notes_for_paper(paper_id, path=notes.DB_PATH)
+        return Response(status_code=204)
+    finally:
+        paper_lock.release()
+
+
+@app.get("/papers/{paper_id}/pdf")
+def paper_pdf(paper_id: str):
+    if not re.fullmatch(r"[a-z0-9-]+", paper_id) or not any(
+            paper["paper_id"] == paper_id for paper in list_papers()):
+        raise HTTPException(status_code=404, detail="Paper not found")
+    path = PAPERS_DIR / f"{paper_id}.pdf"
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Paper not found")
+    return FileResponse(path, media_type="application/pdf", filename=f"{paper_id}.pdf",
+                        content_disposition_type="inline", headers={"X-Content-Type-Options": "nosniff"})
 
 
 @app.post("/compare", response_model=AnswerResult)
@@ -467,7 +569,8 @@ def test_local_api():
             assert response.json() == {"chunks": get_collection().count(), **get_collection().metadata,
                                        "answers_left": None, "daily_limit": None, "session_limit": None}, \
                 "health reports index count and stored settings"
-            assert client.get("/session").json() == {"deployed": False, "authenticated": True}
+            assert client.get("/session").json() == {"deployed": False, "authenticated": True,
+                "role": None, "can_upload": True, "max_upload_mb": 20}
             with patch(__name__ + ".get_collection") as empty_collection:
                 empty_collection.return_value.count.return_value = 0
                 empty_collection.return_value.metadata = None
@@ -499,8 +602,8 @@ def test_local_api():
                 assert client.post("/ask", json=payload).json() == {**result, "cached": True}
                 with patch.object(deploy, "PAPERS", {}):
                     unlinked = client.post("/ask", json=payload).json()
-                    assert all(s["page"] is not None and s["url"] is None for s in unlinked["sources"]), \
-                        "papers outside the demo list retain pages without links"
+                    assert all(s["url"] == f"/papers/{s['paper_id']}/pdf#page={s['page']}"
+                               for s in unlinked["sources"]), "uploaded sources link to authenticated PDFs"
             with patch(__name__ + ".retrieve", side_effect=AssertionError("cache hit retrieved chunks")):
                 repeated = client.post("/ask", json=payload).json()
                 assert repeated == {**result, "cached": True} and len(prompts) == 1
@@ -677,6 +780,13 @@ def test_local_api():
             test_deployed(client, payload, ids, pid, fake_answerer)
             test_auth(payload, fake_answerer)
             test_session_budget(payload, fake_answerer)
+            test_owner_keys()
+            test_upload_configuration()
+            test_owner_library()
+            test_seed_data()
+            test_refunds(payload)
+            test_midnight_refund()
+            test_web_deletion()
     finally:
         app.dependency_overrides.clear()
         app.dependency_overrides.update(previous)
@@ -690,13 +800,13 @@ def test_deployed(client, payload, ids, pid, fake_answerer):
     with TemporaryDirectory() as directory:
         path = Path(directory) / "budget.db"
         with patch.object(deploy, "DEPLOYED", True), patch.object(deploy, "DAILY_LLM_LIMIT", 2), \
-             patch.object(notes, "DB_PATH", path), patch.dict(os.environ, {"APP_PASSWORD": "test-password"}), \
+             patch.object(notes, "DB_PATH", path), patch.dict(os.environ, {"APP_PASSWORD": "test-password", "ANTHROPIC_API_KEY": "test-key"}), \
              patch(__name__ + ".ask_claude", side_effect=fake_answerer) as paid:
-            client.cookies.set(auth.COOKIE_NAME, auth.sign("budget-tests", int(time.time()) + 3600))
+            client.cookies.set(auth.COOKIE_NAME, auth.sign("budget-tests", "visitor", int(time.time()) + 3600))
             app.dependency_overrides.pop(get_answerer, None)
             assert client.post("/papers", content=b"not even multipart").status_code == 403
             response = client.post("/papers", files={"file": ("demo.pdf", b"%PDF", "application/pdf")})
-            assert response.json() == {"detail": "Uploads are disabled on the demo."}
+            assert response.json() == {"detail": "Only the owner can add or delete papers."}
             for endpoint, body in (("/ask", payload), ("/compare", {"question": payload["question"], "paper_ids": ids}),
                                    ("/summarize", {"paper_id": pid})):
                 cache.clear(path=notes.DB_PATH)
@@ -734,7 +844,7 @@ def test_deployed(client, payload, ids, pid, fake_answerer):
             assert deploy.llm_calls_today(path=path) == 2
             path.unlink()
             with ThreadPoolExecutor(max_workers=8) as pool:
-                accepted = list(pool.map(lambda _: deploy.take_llm_call("budget-tests", path=path), range(16)))
+                accepted = list(pool.map(lambda _: deploy.take_llm_call("budget-tests", path=path)[1], range(16)))
             assert accepted.count(None) == 2 and deploy.llm_calls_today(path=path) == 2
             client.cookies.clear()
 
@@ -748,14 +858,16 @@ def test_auth(payload, fake_answerer):
 
     with TemporaryDirectory() as directory, patch.object(notes, "DB_PATH", Path(directory) / "auth.db"), \
          patch.object(deploy, "DEPLOYED", True), patch.object(auth, "failed_logins", deque()), \
-         patch.dict(os.environ, {"APP_PASSWORD": "", "SESSION_SECRET": ""}), \
+         patch.dict(os.environ, {"APP_PASSWORD": "", "OWNER_PASSWORD": "", "SESSION_SECRET": "",
+                                 "PAPERPILOT_MAX_UPLOAD_MB": "4"}), \
          patch(__name__ + ".ask_claude", side_effect=fake_answerer), \
          TestClient(app, base_url="https://testserver") as client:
         for endpoint, body in (("/search", payload), ("/login", {"password": "test-password"})):
             response = client.post(endpoint, json=body)
             assert response.status_code == 503 and response.json()["detail"] == "This demo is not configured."
         assert client.get("/health").status_code == 200
-        assert client.get("/session").json() == {"deployed": True, "authenticated": False}
+        assert client.get("/session").json() == {"deployed": True, "authenticated": False,
+            "role": None, "can_upload": False, "max_upload_mb": 4}
         os.environ["APP_PASSWORD"] = "test-password"
         assert client.post("/login", json={"password": "x" * 257}).status_code == 422
         assert not auth.failed_logins, "oversized passwords are rejected before login attempts"
@@ -771,8 +883,10 @@ def test_auth(payload, fake_answerer):
         header = response.headers["set-cookie"].lower()
         assert all(part in header for part in ("httponly", "secure", "samesite=lax", "path=/", "max-age=604800"))
         cookie = client.cookies.get(auth.COOKIE_NAME)
-        session_id = auth.read_session(cookie)
-        assert session_id and session_id != "streamlit"
+        session = auth.read_session(cookie)
+        assert session and session[0] != "streamlit" and session[1] == "visitor"
+        assert client.get("/session").json()["role"] == "visitor"
+        assert client.get("/session").json()["can_upload"] is False
         assert client.get("/session").json()["authenticated"]
         assert client.post("/search", json=payload).status_code == 200, "password-derived signing key works"
         with patch.dict(os.environ, {"APP_PASSWORD": "changed-password"}):
@@ -788,7 +902,9 @@ def test_auth(payload, fake_answerer):
         assert client.cookies.get(auth.COOKIE_NAME) is None
         assert client.get("/session").json()["authenticated"] is False
         bad_signature = cookie[:-1] + ("0" if cookie[-1] != "0" else "1")
-        invalid_cookies = (None, bad_signature, auth.sign("expired", int(time.time()) - 1), "malformed",
+        old_cookie = cookie.replace(".visitor", "")
+        invalid_cookies = (None, bad_signature, auth.sign("expired", "visitor", int(time.time()) - 1), "malformed",
+                           old_cookie, cookie.replace(".visitor.", ".owner."),
                            "a.not-a-time.signature", "a." + "9" * 100 + "." + "a" * 64)
         for invalid in invalid_cookies:
             client.cookies.clear()
@@ -800,7 +916,7 @@ def test_auth(payload, fake_answerer):
             assert client.get("/session").json()["authenticated"] is False
         auth.failed_logins.clear()
         with ThreadPoolExecutor(max_workers=12) as pool:
-            errors = list(pool.map(lambda _: auth.login_error("wrong"), range(24)))
+            errors = list(pool.map(lambda _: auth.check_login("wrong")[1], range(24)))
         assert errors.count("incorrect") == 10 and errors.count("limited") == 14
 
         # The cached client must still work after its first cookie would have expired.
@@ -809,6 +925,8 @@ def test_auth(payload, fake_answerer):
         api_client.clear()
         try:
             streamlit = api_client()
+            result, error = request("GET", "/session")
+            assert error is None and result["role"] == "visitor" and result["can_upload"] is False
             now = time.time()
             for moment in (now, now + auth.SESSION_SECONDS + 86400):
                 with patch.object(time, "time", return_value=moment):
@@ -827,12 +945,13 @@ def test_session_budget(payload, fake_answerer):
 
     with TemporaryDirectory() as directory, patch.object(notes, "DB_PATH", Path(directory) / "sessions.db"), \
          patch.object(deploy, "DEPLOYED", True), \
-         patch.dict(os.environ, {"APP_PASSWORD": "test-password", "SESSION_SECRET": "test-signing-secret"}), \
+         patch.dict(os.environ, {"APP_PASSWORD": "test-password", "SESSION_SECRET": "test-signing-secret",
+                                 "ANTHROPIC_API_KEY": "test-key"}), \
          patch(__name__ + ".ask_claude", side_effect=fake_answerer) as paid, \
          TestClient(app, base_url="https://testserver") as client:
         def use_session(session_id):
             client.cookies.clear()
-            client.cookies.set(auth.COOKIE_NAME, auth.sign(session_id, int(time.time()) + 3600))
+            client.cookies.set(auth.COOKIE_NAME, auth.sign(session_id, "visitor", int(time.time()) + 3600))
 
         def ask_uncached():
             cache.clear(path=notes.DB_PATH)
@@ -876,12 +995,12 @@ def test_session_budget(payload, fake_answerer):
 
         concurrent_path = Path(directory) / "concurrent.db"
         with ThreadPoolExecutor(max_workers=8) as pool:
-            accepted = list(pool.map(lambda _: deploy.take_llm_call("same", path=concurrent_path), range(24)))
+            accepted = list(pool.map(lambda _: deploy.take_llm_call("same", path=concurrent_path)[1], range(24)))
         assert accepted.count(None) == 10 and accepted.count("session") == 14
         assert deploy.llm_calls_today(path=concurrent_path) == deploy.session_calls_today("same", path=concurrent_path) == 10
         concurrent_path = Path(directory) / "global.db"
         with ThreadPoolExecutor(max_workers=8) as pool:
-            accepted = list(pool.map(lambda i: deploy.take_llm_call(str(i), path=concurrent_path), range(64)))
+            accepted = list(pool.map(lambda i: deploy.take_llm_call(str(i), path=concurrent_path)[1], range(64)))
         assert accepted.count(None) == 40 and accepted.count("global") == 24
         assert deploy.llm_calls_today(path=concurrent_path) == 40
 
@@ -889,7 +1008,6 @@ def test_session_budget(payload, fake_answerer):
 def test_uploads(client, indexed):
     from tempfile import TemporaryDirectory
     from unittest.mock import patch
-    import fitz
 
     with TemporaryDirectory() as directory:
         save_dir = Path(directory) / "papers"
@@ -899,7 +1017,8 @@ def test_uploads(client, indexed):
             assert path.parent == save_dir
             with fitz.open(path) as pdf:
                 assert pdf.page_count == 1
-            records.append({"paper_id": path.stem, "title": "Uploaded paper", "chunks": 1, "pages": 1})
+            records.append({"paper_id": path.stem, "title": "Uploaded paper", "chunks": 1, "pages": 1,
+                            "builtin": False})
 
         with patch(__name__ + ".PAPERS_DIR", save_dir), \
              patch(__name__ + ".list_papers", side_effect=lambda: records), \
@@ -909,7 +1028,8 @@ def test_uploads(client, indexed):
                 return client.post("/papers", files={"file": (name, data, "application/pdf")})
 
             assert upload("wrong.pdf", b"not a pdf").status_code == 422
-            assert upload("large.pdf", b"%PDF" + b"x" * MAX_UPLOAD).status_code == 422
+            response = upload("large.pdf", b"%PDF" + b"x" * (20 * 1024 * 1024))
+            assert response.status_code == 422 and response.json()["detail"] == "PDF must be at most 20 MB"
             assert upload(indexed[0]["paper_id"] + ".pdf", b"%PDF").status_code == 409
             assert upload("!!!.pdf", b"%PDF").status_code == 422
             assert upload("wrong.txt", b"%PDF").status_code == 422
@@ -922,9 +1042,356 @@ def test_uploads(client, indexed):
             assert response.json() == records[-1]
             assert (save_dir / "uploadedpaper.pdf").read_bytes() == data
             ingest_mock.side_effect = ValueError("bad PDF")
-            assert upload("broken.pdf", b"%PDF broken").status_code == 422
+            assert upload("broken.pdf", data).status_code == 422
             assert not (save_dir / "broken.pdf").exists()
             collection.return_value.delete.assert_called_once_with(where={"paper_id": "broken"})
+
+
+def test_owner_keys():
+    from collections import deque
+    from contextlib import redirect_stdout
+    from io import StringIO
+    import runpy
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+
+    with patch.dict(os.environ, {"APP_PASSWORD": "visitor-password", "OWNER_PASSWORD": "owner-password",
+                                 "SESSION_SECRET": "private-secret"}), \
+         patch.object(auth, "failed_logins", deque()), patch.object(deploy, "DEPLOYED", True), \
+         TestClient(app, base_url="https://testserver") as client:
+        expires = int(time.time()) + 3600
+        owner = auth.sign("owner-test", "owner", expires)
+        visitor = auth.sign("visitor-test", "visitor", expires)
+        expected_key = auth.hmac.new(b"private-secret", b"owner:owner-password", auth.hashlib.sha256).digest()
+        assert auth.signing_key("owner") == expected_key
+        assert auth.read_session(owner) == ("owner-test", "owner")
+        with patch.dict(os.environ, {"OWNER_PASSWORD": "new-owner-password"}):
+            assert auth.read_session(owner) is None, "password rotation signs owners out"
+            assert auth.read_session(visitor) == ("visitor-test", "visitor")
+            assert client.post("/login", json={"password": "owner-password"}).status_code == 401
+            assert client.post("/login", json={"password": "new-owner-password"}).status_code == 200
+
+        for disabled in ({"SESSION_SECRET": ""}, {"OWNER_PASSWORD": ""},
+                         {"OWNER_PASSWORD": "visitor-password"}, {"SESSION_SECRET": "visitor-password"}):
+            with patch.dict(os.environ, disabled):
+                assert not auth.owner_enabled()
+                assert auth.read_session(owner) is None
+                message = f"forged.owner.{expires}"
+                signature = auth.hmac.new(auth.signing_key(), message.encode(), auth.hashlib.sha256).hexdigest()
+                assert auth.read_session(f"{message}.{signature}") is None, "visitor key cannot grant owner access"
+                assert client.post("/login", json={"password": "owner-password"}).status_code == 401
+                assert client.post("/login", json={"password": "visitor-password"}).status_code == 200
+                assert client.get("/session").json()["role"] == "visitor"
+                assert client.get("/session").json()["can_upload"] is False
+
+        output = StringIO()
+        with patch.dict(os.environ, {"OWNER_PASSWORD": "visitor-password"}), \
+             patch.object(sys, "argv", ["deploy.py", "check"]), redirect_stdout(output):
+            runpy.run_path(str(Path(__file__).with_name("deploy.py")), run_name="__main__")
+        assert "Warning: OWNER_PASSWORD matches APP_PASSWORD" in output.getvalue()
+        assert "visitor-password" not in output.getvalue() and "private-secret" not in output.getvalue()
+
+
+def test_upload_configuration():
+    from contextlib import redirect_stderr
+    from io import StringIO
+    import subprocess
+    from unittest.mock import patch
+
+    for value, expected in (("4.5", 4.5), ("3", 3.0), ("bad", 4.0), ("0", 4.0),
+                            ("-1", 4.0), ("nan", 4.0), ("inf", 4.0), ("", 4.0)):
+        warning = StringIO()
+        with patch.dict(os.environ, {"PAPERPILOT_MAX_UPLOAD_MB": value}), redirect_stderr(warning):
+            assert configured_upload_mb() == expected
+        assert bool(warning.getvalue()) == (value not in ("4.5", "3"))
+    # Import in a fresh process to check the actual startup constants without reloading the app under test.
+    subprocess.run([sys.executable, "-c", """
+import os
+import step7_api as api
+from fastapi.testclient import TestClient
+assert api.DEPLOYED_UPLOAD_BYTES == int(4.5 * 1024 * 1024)
+os.environ['PAPERPILOT_MAX_UPLOAD_MB'] = 'invalid-after-import'
+with TestClient(api.app) as client:
+    assert client.get('/session').json()['max_upload_mb'] == 4.5
+api.deploy.DEPLOYED = False
+assert api.max_upload_mb() == 20
+"""], env={**os.environ, "PAPERPILOT_MAX_UPLOAD_MB": "4.5", "PAPERPILOT_DEPLOYED": "1"}, check=True)
+
+
+def test_midnight_refund():
+    from datetime import datetime, timezone
+    from tempfile import TemporaryDirectory
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    import httpx
+
+    before = datetime(2026, 10, 27, 23, 59, 59, tzinfo=timezone.utc)
+    after = datetime(2026, 10, 28, 0, 0, 1, tzinfo=timezone.utc)
+    with TemporaryDirectory() as directory, patch.object(notes, "DB_PATH", Path(directory) / "midnight.db"), \
+         patch.object(deploy, "DEPLOYED", True), patch.object(deploy, "datetime") as clock, \
+         patch.dict(os.environ, {"ANTHROPIC_API_KEY": "test-key"}):
+        clock.now.return_value = before
+
+        def fail_after_midnight(prompt):
+            clock.now.return_value = after
+            assert deploy.take_llm_call("midnight", path=notes.DB_PATH) == ("2026-10-28", None)
+            raise RuntimeError("connection failed") from APIConnectionError(request=httpx.Request("POST", "https://test"))
+
+        with patch(__name__ + ".ask_claude", side_effect=fail_after_midnight):
+            try:
+                get_answerer(SimpleNamespace(state=SimpleNamespace(session_id="midnight")))("question")
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("API failure must propagate")
+        assert deploy.llm_calls_today(path=notes.DB_PATH) == 1
+        assert deploy.session_calls_today("midnight", path=notes.DB_PATH) == 1
+        clock.now.return_value = before
+        assert deploy.llm_calls_today(path=notes.DB_PATH) == 0
+        assert deploy.session_calls_today("midnight", path=notes.DB_PATH) == 0
+
+
+def test_web_deletion():
+    import subprocess
+
+    subprocess.run(["node", "selftest.mjs"], cwd=Path(__file__).parent / "web", check=True)
+
+
+def test_owner_library():
+    from collections import deque
+    from concurrent.futures import ThreadPoolExecutor
+    from tempfile import TemporaryDirectory
+    from threading import Event
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+
+    with fitz.open() as pdf:
+        pdf.new_page().insert_text((72, 72), "An uploaded paper")
+        data = pdf.tobytes()
+        for _ in range(60):
+            pdf.new_page()
+        long_pdf = pdf.tobytes()
+    collection = get_collection()  # selftest has redirected this to a temporary copy.
+    sample = collection.get(limit=1, include=["embeddings"])["embeddings"][0].tolist()
+    entered, finish = Event(), Event()
+
+    def fake_ingest(path):
+        if path.stem == "slow-upload":
+            entered.set()
+            assert finish.wait(10), "test did not release the fake ingest"
+        collection.add(ids=[f"{path.stem}-0"], documents=["Uploaded text"], embeddings=[sample],
+                       metadatas=[{"paper_id": path.stem, "title": "Uploaded paper", "page": 1,
+                                   "page_end": 1, "section": "Abstract", "chunk_index": 0}])
+        return 1
+
+    with TemporaryDirectory() as directory, patch.object(notes, "DB_PATH", Path(directory) / "notes.db"), \
+         patch(__name__ + ".PAPERS_DIR", Path(directory) / "papers"), \
+         patch(__name__ + ".ingest", side_effect=fake_ingest) as ingest_mock, \
+         patch.object(deploy, "DEPLOYED", True), patch.object(auth, "failed_logins", deque()), \
+         patch.dict(os.environ, {"APP_PASSWORD": "visitor-password", "OWNER_PASSWORD": "owner-password",
+                                 "SESSION_SECRET": "test-secret", "PAPERPILOT_MAX_UPLOAD_MB": "4"}), \
+         TestClient(app, base_url="https://testserver") as client:
+        def upload(name, content=data):
+            return client.post("/papers", files={"file": (name + ".pdf", content, "application/pdf")})
+
+        # Roles: anonymous, visitor and owner permissions.
+        assert client.get("/papers/owner-upload/pdf").status_code == 401
+        assert client.post("/login", json={"password": "visitor-password"}).status_code == 200
+        assert client.get("/session").json()["role"] == "visitor"
+        # FastAPI reads multipart through Request.stream. A visitor must never reach it.
+        async def unread_stream(request):
+            raise AssertionError("read visitor body")
+            yield b""  # Keep this an async generator; fail on iteration, not creation.
+
+        with patch("starlette.requests.Request.stream", unread_stream):
+            response = client.post("/papers", content=b"never read")
+            assert response.status_code == 403
+            assert response.json()["detail"] == "Only the owner can add or delete papers."
+        assert client.delete("/papers/attention").status_code == 403
+        with patch.object(auth.hmac, "compare_digest", wraps=auth.hmac.compare_digest) as compare:
+            assert auth.check_login("owner-password") == ("owner", None)
+            assert compare.call_count == 2
+            compare.reset_mock()
+            assert auth.check_login("visitor-password") == ("visitor", None)
+            assert compare.call_count == 2
+        assert client.post("/login", json={"password": "owner-password"}).status_code == 200
+        assert client.get("/session").json() == {"deployed": True, "authenticated": True,
+            "role": "owner", "can_upload": True, "max_upload_mb": 4}
+        # Upload limits: decimals, bytes, page count, library size and lock contention.
+        with patch(__name__ + ".DEPLOYED_UPLOAD_MB", 4.5), \
+             patch(__name__ + ".DEPLOYED_UPLOAD_BYTES", int(4.5 * 1024 * 1024)):
+            assert client.get("/session").json()["max_upload_mb"] == 4.5
+            response = upload("too-large", b"%PDF" + b"x" * int(4.5 * 1024 * 1024))
+            assert response.status_code == 422 and response.json()["detail"] == "PDF must be at most 4.5 MB"
+            with patch(__name__ + ".save_paper", return_value={"paper_id": "decimal", "title": "Decimal",
+                    "chunks": 1, "pages": 1, "builtin": False}):
+                assert upload("decimal", b"%PDF" + b"x" * (4 * 1024 * 1024)).status_code == 200
+        response = upload("too-large", b"%PDF" + b"x" * (4 * 1024 * 1024))
+        assert response.status_code == 422 and response.json()["detail"] == "PDF must be at most 4 MB"
+        response = upload("too-many-pages", long_pdf)
+        assert response.status_code == 422 and response.json()["detail"] == "PDFs over 60 pages aren't supported here."
+        assert not PAPERS_DIR.exists() and not ingest_mock.called
+        assert not collection.get(where={"paper_id": "too-many-pages"})["ids"]
+        with patch(__name__ + ".list_papers", return_value=[{"paper_id": f"p{i}"} for i in range(20)]):
+            response = upload("full")
+            assert response.status_code == 409
+            assert response.json()["detail"] == "The library is full (20 papers). Delete one first."
+        assert not PAPERS_DIR.exists() and not ingest_mock.called
+        with paper_lock:
+            for response in (upload("busy"), client.delete("/papers/missing")):
+                assert response.status_code == 409 and response.json()["detail"] == BUSY_LIBRARY
+        # Storage: recover an orphan, preserve indexed duplicates and serve authenticated PDFs.
+        PAPERS_DIR.mkdir(parents=True)
+        (PAPERS_DIR / "owner-upload.pdf").write_bytes(b"stale partial upload")
+        response = upload("owner-upload")
+        assert response.status_code == 200 and response.json()["builtin"] is False
+        assert all(p["builtin"] == (p["paper_id"] in deploy.PAPERS) for p in client.get("/papers").json())
+        assert upload("owner-upload").status_code == 409
+        assert (PAPERS_DIR / "owner-upload.pdf").read_bytes() == data
+        assert client.delete("/papers/attention").json()["detail"] == "Built-in papers can't be deleted."
+        assert client.delete("/papers/attention").status_code == 403
+        assert client.delete("/papers/missing").status_code == 404
+        for path in ("/papers/missing/pdf", "/papers/..%2Fattention/pdf", "/papers/%2E%2E/pdf",
+                     "/papers/OWNER-UPLOAD/pdf"):
+            assert client.get(path).status_code == 404
+        response = client.get("/papers/owner-upload/pdf")
+        assert response.status_code == 200 and response.content == data
+        assert response.headers["content-type"] == "application/pdf"
+        assert response.headers["content-disposition"].startswith("inline;")
+        assert response.headers["x-content-type-options"] == "nosniff"
+        client.post("/login", json={"password": "visitor-password"})
+        assert client.get("/papers/owner-upload/pdf").content == data, "visitors can read uploaded sources"
+        assert client.delete("/papers/owner-upload").status_code == 403
+        client.post("/login", json={"password": "owner-password"})
+        # Deletion: remove chunks, PDF and notes, then allow the id to be reused.
+        notes.add_note("owner-upload", "Delete this note", path=notes.DB_PATH)
+        keep = notes.add_note("attention", "Keep this note", path=notes.DB_PATH)
+        fingerprint = index_fingerprint()
+        assert client.delete("/papers/owner-upload").status_code == 204
+        assert not collection.get(where={"paper_id": "owner-upload"})["ids"]
+        assert not (PAPERS_DIR / "owner-upload.pdf").exists()
+        assert notes.list_notes(path=notes.DB_PATH) == [keep]
+        assert index_fingerprint() != fingerprint
+        assert client.get("/papers/owner-upload/pdf").status_code == 404
+        assert upload("owner-upload").status_code == 200, "deleting frees the id and filename"
+        assert client.delete("/papers/owner-upload").status_code == 204
+        # A blocked embedding job must not block the event loop or allow a second writer.
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pending = pool.submit(upload, "slow-upload")
+            try:
+                assert entered.wait(10)
+                assert client.get("/health").status_code == 200
+                assert upload("second-upload").status_code == 409
+                assert client.delete("/papers/attention").status_code == 409
+            finally:
+                finish.set()
+            assert pending.result(timeout=10).status_code == 200
+        assert client.delete("/papers/slow-upload").status_code == 204
+
+
+def test_seed_data():
+    from tempfile import TemporaryDirectory
+    from unittest.mock import patch
+
+    with TemporaryDirectory() as directory:
+        root = Path(directory)
+        image = root / "image"
+        for name in ("chroma_db", "papers"):
+            (image / name).mkdir(parents=True)
+            (image / name / "built-in").write_bytes(b"image data")
+        index, papers = root / "disk" / "chroma_db", root / "disk" / "papers"
+        with patch.object(deploy, "IMAGE_DIR", image), patch.object(deploy, "INDEX_DIR", index), \
+             patch.object(deploy, "PAPERS_DIR", papers):
+            for target in (index, papers):
+                stale = target.parent / f".{target.name}-seed-crashed"
+                stale.mkdir(parents=True)
+                (stale / "partial").write_bytes(b"incomplete copy")
+            deploy.seed_data()
+            assert not list(index.parent.glob(".*-seed-*")), "crash leftovers are removed"
+            assert (index / "built-in").read_bytes() == (papers / "built-in").read_bytes() == b"image data"
+            (index / "built-in").write_bytes(b"disk index")
+            (papers / "upload.pdf").write_bytes(b"keep uploads")
+            deploy.seed_data()
+            assert (index / "built-in").read_bytes() == b"disk index"
+            assert (papers / "upload.pdf").read_bytes() == b"keep uploads"
+            assert sorted(p.name for p in index.parent.iterdir()) == ["chroma_db", "papers"]
+            # A failed copy leaves no target, and the next startup can seed it again.
+            missing = root / "failed-index"
+            with patch.object(deploy, "INDEX_DIR", missing), \
+                 patch.object(deploy.shutil, "copytree", side_effect=OSError("interrupted")):
+                try:
+                    deploy.seed_data()
+                except OSError:
+                    pass
+                else:
+                    raise AssertionError("copy failure should propagate")
+                assert not missing.exists()
+            with patch.object(deploy, "INDEX_DIR", image / "chroma_db"), \
+                 patch.object(deploy, "PAPERS_DIR", image / "papers"), \
+                 patch.object(deploy.shutil, "copytree", side_effect=AssertionError("copied onto itself")):
+                deploy.seed_data()
+
+
+def test_refunds(payload):
+    from tempfile import TemporaryDirectory
+    from types import SimpleNamespace
+    from unittest.mock import patch
+    from fastapi.testclient import TestClient
+    import httpx
+    import anthropic
+    from step4_answer import ask_claude as real_ask_claude
+
+    previous = app.dependency_overrides.pop(get_answerer, None)
+    try:
+        with TemporaryDirectory() as directory, patch.object(notes, "DB_PATH", Path(directory) / "refund.db"), \
+             patch.object(deploy, "DEPLOYED", True), \
+             patch.dict(os.environ, {"APP_PASSWORD": "test-password", "ANTHROPIC_API_KEY": "test-key"}), \
+             TestClient(app, base_url="https://testserver") as client:
+            client.cookies.set(auth.COOKIE_NAME, auth.sign("refund-tests", "visitor", int(time.time()) + 3600))
+            with patch.dict(os.environ, {"ANTHROPIC_API_KEY": ""}), \
+                 patch.object(deploy, "take_llm_call", wraps=deploy.take_llm_call) as reserve:
+                response = client.post("/ask", json=payload)
+                assert response.status_code == 503 and response.json() == {"detail": "This demo is not configured."}
+                assert not reserve.called
+                assert deploy.llm_calls_today(path=notes.DB_PATH) == 0
+                assert deploy.session_calls_today("refund-tests", path=notes.DB_PATH) == 0
+            request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+            connection_error = anthropic.APIConnectionError(request=request)
+            status_error = anthropic.APIStatusError("unavailable", response=httpx.Response(503, request=request),
+                                                   body={"error": {"message": "unavailable"}})
+            # Exercise ask_claude's real exception wrapping, with only the SDK network call replaced.
+            with patch.object(anthropic, "Anthropic") as sdk:
+                create = sdk.return_value.beta.messages.create
+                with patch(__name__ + ".ask_claude", wraps=real_ask_claude):
+                    for error in (connection_error, status_error):
+                        create.side_effect = error
+                        assert client.post("/ask", json=payload).status_code == 502
+                        assert deploy.llm_calls_today(path=notes.DB_PATH) == 0
+                        assert deploy.session_calls_today("refund-tests", path=notes.DB_PATH) == 0
+                    create.side_effect = anthropic.APITimeoutError(request=request)
+                    assert client.post("/ask", json=payload).status_code == 502
+                    assert deploy.llm_calls_today(path=notes.DB_PATH) == 1
+                    assert deploy.session_calls_today("refund-tests", path=notes.DB_PATH) == 1
+                    create.side_effect = None
+                    create.return_value.stop_reason = "end_turn"
+                    create.return_value.model = MODEL
+                    create.return_value.content = [SimpleNamespace(type="text", text="Eight [1].")]
+                    assert client.post("/ask", json=payload).status_code == 200
+                    assert deploy.llm_calls_today(path=notes.DB_PATH) == 2
+                    cache.clear(path=notes.DB_PATH)
+                    for count, reason in enumerate(("refusal", "max_tokens"), start=3):
+                        create.return_value.stop_reason = reason
+                        assert client.post("/ask", json=payload).status_code == 502
+                        assert deploy.llm_calls_today(path=notes.DB_PATH) == count
+                        assert deploy.session_calls_today("refund-tests", path=notes.DB_PATH) == count
+            day = deploy.datetime.now(deploy.timezone.utc).date().isoformat()
+            for _ in range(6):
+                deploy.release_llm_call("refund-tests", day, path=notes.DB_PATH)
+            assert deploy.llm_calls_today(path=notes.DB_PATH) == 0
+            assert deploy.session_calls_today("refund-tests", path=notes.DB_PATH) == 0
+    finally:
+        if previous is not None:
+            app.dependency_overrides[get_answerer] = previous
 
 
 def main():

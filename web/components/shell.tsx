@@ -43,6 +43,7 @@ export function Shell({ children }: { children: ReactNode }) {
           className={pathname === href ? styles.active : undefined}>{label}</Link>)}
       </nav>
       <footer className={styles.footer}>
+        {state.session?.role === "owner" && <p>Signed in as owner</p>}
         {state.health?.answers_left != null && <p>{state.health.answers_left} paid answers left today</p>}
         {state.session?.deployed && <button onClick={signOut} disabled={signingOut}>
           {signingOut ? "Signing out…" : "Sign out"}</button>}

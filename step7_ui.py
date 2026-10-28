@@ -49,7 +49,7 @@ def request(method, path, **kwargs):
     try:
         if deploy.DEPLOYED:
             # The page checked the password; renew the shared session cookie because the cached client outlives it.
-            cookie = auth.sign("streamlit", int(time.time()) + auth.SESSION_SECONDS)
+            cookie = auth.sign("streamlit", "visitor", int(time.time()) + auth.SESSION_SECONDS)
             response = api_client().request(method, path, headers={"Cookie": f"{auth.COOKIE_NAME}={cookie}"}, **kwargs)
         else:
             response = httpx.request(method, API + path, timeout=180, **kwargs)
